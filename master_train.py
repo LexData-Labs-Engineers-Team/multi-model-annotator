@@ -26,7 +26,7 @@
 # # ============================================================
 
 # os.makedirs(cfg.SAVE_DIR, exist_ok=True)
-# _log_file = open(cfg.MASTER_LOG, "w", buffering=1)
+# _log_file = open(cfg.MASTER_LOG, "w", buffering=1, encoding="utf-8")
 
 
 # def log(msg=""):
@@ -289,7 +289,7 @@ from data_prep.split_annotations import (
 # ============================================================
 
 os.makedirs(cfg.SAVE_DIR, exist_ok=True)
-_log_file = open(cfg.MASTER_LOG, "w", buffering=1)
+_log_file = open(cfg.MASTER_LOG, "w", buffering=1, encoding="utf-8")
 
 
 def log(msg=""):
@@ -424,32 +424,51 @@ def main():
 
     # --- Polyline ---
     if POLYLINE_TYPE in present_types:
-        log("\n" + "═" * 55)
-        log("  [4/5] POLYLINE MODEL — Stage 1")
-        log("═" * 55)
-        s1_ok = False
-        try:
-            from polyline_model.train_polyline_s1 import train as train_s1
-            best_s1 = train_s1(images=images, log_fn=log)
-            results[f"{POLYLINE_TYPE}_s1"] = best_s1
-            s1_ok = True
-        except Exception as e:
-            log(f"  FAILED (Stage 1): {e}")
-            failures[f"{POLYLINE_TYPE}_s1"] = str(e)
-
-        if s1_ok:
-            log("\n" + "─" * 55)
-            log("  [4/5] POLYLINE MODEL — Stage 2")
-            log("─" * 55)
+        if getattr(cfg, "POLY_USE_SEG", True):
+            # New path: HRNet per-class segmentation
+            log("\n" + "═" * 55)
+            log("  [4/5] POLYLINE MODEL — Segmentation (HRNet)")
+            log("═" * 55)
             try:
-                from polyline_model.train_polyline_s2 import train as train_s2
-                best_s2 = train_s2(images=images, log_fn=log)
-                results[f"{POLYLINE_TYPE}_s2"] = best_s2
+                from data_prep.split_annotations import get_labels_for_type
+                classes = get_labels_for_type(images, POLYLINE_TYPE)
+                log(f"  Polyline classes (auto-derived): {classes}")
+                from polyline_model_working.train_polyline_seg import (
+                    train as train_seg
+                )
+                best = train_seg(images=images, log_fn=log, classes=classes)
+                results[POLYLINE_TYPE] = best
             except Exception as e:
-                log(f"  FAILED (Stage 2): {e}")
-                failures[f"{POLYLINE_TYPE}_s2"] = str(e)
+                log(f"  FAILED: {e}")
+                failures[POLYLINE_TYPE] = str(e)
         else:
-            log("  Stage 2 skipped — Stage 1 failed.")
+            # Legacy 2-stage path (kept for A/B comparison)
+            log("\n" + "═" * 55)
+            log("  [4/5] POLYLINE MODEL — Stage 1 (legacy)")
+            log("═" * 55)
+            s1_ok = False
+            try:
+                from polyline_model.train_polyline_s1 import train as train_s1
+                best_s1 = train_s1(images=images, log_fn=log)
+                results[f"{POLYLINE_TYPE}_s1"] = best_s1
+                s1_ok = True
+            except Exception as e:
+                log(f"  FAILED (Stage 1): {e}")
+                failures[f"{POLYLINE_TYPE}_s1"] = str(e)
+
+            if s1_ok:
+                log("\n" + "─" * 55)
+                log("  [4/5] POLYLINE MODEL — Stage 2 (legacy)")
+                log("─" * 55)
+                try:
+                    from polyline_model.train_polyline_s2 import train as train_s2
+                    best_s2 = train_s2(images=images, log_fn=log)
+                    results[f"{POLYLINE_TYPE}_s2"] = best_s2
+                except Exception as e:
+                    log(f"  FAILED (Stage 2): {e}")
+                    failures[f"{POLYLINE_TYPE}_s2"] = str(e)
+            else:
+                log("  Stage 2 skipped — Stage 1 failed.")
     else:
         log("\n  [4/5] POLYLINE — skipped")
 

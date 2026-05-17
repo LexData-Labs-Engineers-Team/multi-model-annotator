@@ -187,14 +187,21 @@ def compute_iou(probs, targets, thresh, eps=1e-6):
 # --- Train entry point ---
 # ============================================================
 
-def train(images, log_fn=print):
+def train(images, log_fn=print, classes=None):
     """Train HRNet-W18 polyline segmentation model.
+    `classes` (if given) takes precedence over cfg.POLY_SEG_CLASSES so
+    callers can auto-derive the class list from parsed CVAT XML.
     Returns path to best checkpoint."""
     log_fn("\n" + "─" * 50)
     log_fn("  POLYLINE MODEL — HRNet-W18 segmentation")
     log_fn("─" * 50)
 
-    classes      = list(cfg.POLY_SEG_CLASSES)
+    classes_cfg = list(cfg.POLY_SEG_CLASSES) if cfg.POLY_SEG_CLASSES else []
+    classes     = list(classes) if classes else classes_cfg
+    if not classes:
+        raise RuntimeError(
+            "No polyline classes — pass classes=... or set cfg.POLY_SEG_CLASSES."
+        )
     num_classes  = len(classes)
     input_size   = int(cfg.POLY_SEG_INPUT_SIZE)
     epochs       = int(cfg.POLY_SEG_EPOCHS)

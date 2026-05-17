@@ -38,7 +38,7 @@ import config as cfg
 # ============================================================
 
 # Folder of images to run inference on
-IMAGES_DIR      = "/home/lexdata/Documents/LexAnnotate_demo/m_env/multi_pipeline/datasets/bonsai_v2/images"
+IMAGES_DIR      = cfg.IMG_DIR
 
 # Output folder
 OUTPUT_DIR      = os.path.join(cfg.SAVE_DIR, "test_output")
@@ -49,8 +49,7 @@ BBOX_MODEL_PATH     = os.path.join(cfg.BBOX_SAVE_DIR,
 POLYGON_MODEL_PATH  = os.path.join(cfg.POLYGON_SAVE_DIR,
                                    "train", "weights", "best.pt")
 KEYPOINT_MODEL_PATH = os.path.join(cfg.KEYPOINT_SAVE_DIR, "best.pt")
-POLYLINE_S1_PATH    = os.path.join(cfg.POLYLINE_SAVE_DIR, "s1_best.pt")
-POLYLINE_S2_PATH    = os.path.join(cfg.POLYLINE_SAVE_DIR, "s2_best.pt")
+POLYLINE_SEG_PATH   = os.path.join(cfg.POLYLINE_SAVE_DIR, "best_seg.pt")
 TAG_MODEL_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "best.pt")
 TAG_NAMES_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "tag_names.json")
 
@@ -58,8 +57,7 @@ TAG_NAMES_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "tag_names.json")
 BBOX_SCORE_THRESH   = cfg.YOLO_SCORE_THRESH
 POLY_SCORE_THRESH   = cfg.YOLO_SCORE_THRESH
 KP_SCORE_THRESH     = cfg.KP_SCORE_THRESH
-POLY_S1_THRESH      = cfg.POLY_S1_SCORE_THRESH
-EDGE_THRESH         = 0.4       # edge connectivity confidence — lowered from 0.8
+POLY_SEG_THRESH     = cfg.POLY_SEG_THRESH
 TAG_THRESH          = cfg.TAG_SCORE_THRESH
 
 # ---- Visualization settings ----
@@ -131,17 +129,27 @@ def load_heatmap_model(path, backbone):
     return model
 
 
-def load_edge_model(path):
-    sys.path.insert(0, os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "polyline_model"
-    ))
-    from train_polyline_s2 import EdgeMLP
-    ckpt  = torch.load(path, map_location="cpu")
-    model = EdgeMLP(hidden_dim=cfg.POLY_S2_HIDDEN_DIM)
-    state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
-    model.load_state_dict(state)
+def load_polyline_seg(path, device):
+    """Load the HRNet polyline-seg checkpoint and return
+    (model, classes, input_size). The checkpoint embeds its own
+    backbone / classes / input_size config so we don't need cfg values."""
+    from polyline_model_working.train_polyline_seg import HRNetSegModel
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if "config" not in ckpt or "state_dict" not in ckpt:
+        raise RuntimeError(
+            f"Polyline-seg checkpoint at {path} is missing 'config' or "
+            f"'state_dict' — was it saved by train_polyline_seg.py?"
+        )
+    meta       = ckpt["config"]
+    backbone   = meta["backbone"]
+    classes    = list(meta["classes"])
+    input_size = int(meta["input_size"])
+    model = HRNetSegModel(
+        backbone=backbone, num_classes=len(classes), pretrained=False
+    ).to(device)
+    model.load_state_dict(ckpt["state_dict"])
     model.eval()
-    return model
+    return model, classes, input_size
 
 
 def load_tag_model(path, num_tags):
@@ -257,13 +265,15 @@ def run_keypoints(model, img_path, orig_h, orig_w, device):
         )
         heatmap = heatmap.sigmoid().squeeze().cpu().numpy()
 
-    # Extract local maxima as keypoints
+    # Extract local maxima as keypoints. NMS window is set from the
+    # training heatmap sigma (≈ 2σ+1) so peaks closer than the training
+    # blob radius collapse but real separated keypoints survive.
     from scipy.ndimage import maximum_filter
-    from scipy.ndimage import label as ndlabel
-    local_max = (heatmap == maximum_filter(heatmap, size=100))
-    above_thresh = heatmap > KP_SCORE_THRESH
-    peaks = local_max & above_thresh
-    coords = np.argwhere(peaks)   # (N, 2) in (y, x)
+    nms_size      = max(3, 2 * int(cfg.KP_HEATMAP_SIGMA) + 1)
+    local_max     = (heatmap == maximum_filter(heatmap, size=nms_size))
+    above_thresh  = heatmap > KP_SCORE_THRESH
+    peaks         = local_max & above_thresh
+    coords        = np.argwhere(peaks)   # (N, 2) in (y, x)
 
     detections = []
     for (y, x) in coords:
@@ -277,132 +287,57 @@ def run_keypoints(model, img_path, orig_h, orig_w, device):
     return detections
 
 
-def run_polylines(s1_model, s2_model, img_path,
-                  orig_h, orig_w, device):
-    tensor, _, _, _ = preprocess(img_path, cfg.INPUT_SIZE)
-    if tensor is None:
-        return []
-    tensor = tensor.to(device)
+def run_polylines_seg(model, classes, input_size, img_path,
+                      orig_h, orig_w, device):
+    """HRNet polyline-seg inference.
+    Forward → sigmoid → per-class probability map → threshold →
+    skeletonize → trace 8-connected chains → Douglas-Peucker simplify.
+    Reuses the helpers defined in test_polyline_seg.py to keep skeleton
+    + trace logic in one place."""
+    from test_polyline_seg import (
+        _preprocess, _skeletonize, _trace_polylines, _simplify_chain,
+        MIN_CHAIN_LEN,
+    )
 
-    # Stage 1 — detect vertices
+    bgr = cv2.imread(img_path)
+    if bgr is None:
+        return []
+
+    tensor = _preprocess(bgr, input_size, device)
     with torch.no_grad():
-        heatmap = s1_model(tensor)
-        heatmap = F.interpolate(
-            heatmap, size=(orig_h, orig_w),
-            mode="bilinear", align_corners=False
-        )
-        heatmap = heatmap.sigmoid().squeeze().cpu().numpy()
+        logits = model(tensor)
+        probs  = torch.sigmoid(logits).float()
+        probs  = F.interpolate(probs, size=(orig_h, orig_w),
+                               mode="bilinear", align_corners=False)
+    probs = probs.squeeze(0).cpu().numpy()   # (C, H, W)
 
-    from scipy.ndimage import maximum_filter
-    local_max    = (heatmap == maximum_filter(heatmap, size=35))
-    above_thresh = heatmap > POLY_S1_THRESH
-    peaks        = local_max & above_thresh
-    coords       = np.argwhere(peaks)   # (N, 2) in (y, x)
-
-    if len(coords) < 2:
-        print(f"    [polyline] Only {len(coords)} vertex peaks found "
-              f"(need >=2) — try lowering POLY_S1_THRESH")
-        return []
-
-    print(f"    [polyline] {len(coords)} vertex peaks detected")
-    # Normalize coords for edge model
-    verts_norm = [(float(x) / orig_w, float(y) / orig_h)
-                  for (y, x) in coords]
-
-    # Use a generous max dist — cfg value may be too restrictive
-    # for the actual scale of polylines in the image
-    max_dist = max(cfg.POLY_S2_MAX_DIST, 0.3)
-
-    # Stage 2 — predict edges
-    from train_polyline_s2 import build_edge_features
-    edges = []
-    for i in range(len(verts_norm)):
-        for j in range(len(verts_norm)):
-            if i == j:
-                continue
-            x1, y1 = verts_norm[i]
-            x2, y2 = verts_norm[j]
-            dist   = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-            if dist > max_dist:
-                continue
-            feat  = build_edge_features(x1, y1, x2, y2)
-            feat_t= torch.tensor(feat, dtype=torch.float32).unsqueeze(0)
-            with torch.no_grad():
-                logit = s2_model(feat_t)
-                prob  = logit.sigmoid().item()
-            if prob > EDGE_THRESH:
-                edges.append((i, j, prob))
-
-    if not edges:
-        print(f"    [polyline] No edges passed threshold {EDGE_THRESH} "
-              f"— try lowering EDGE_THRESH or POLY_S2_MAX_DIST")
-        return []
-
-    print(f"    [polyline] {len(edges)} edges found, reconstructing polylines...")
-    # Reconstruct polylines via greedy path following
-    polylines = _reconstruct_polylines(verts_norm, edges, orig_w, orig_h)
     detections = []
-    for pts in polylines:
-        if len(pts) >= 2:
+    for c, cname in enumerate(classes):
+        prob_map = probs[c]
+        mask     = (prob_map > POLY_SEG_THRESH).astype(np.uint8) * 255
+        if mask.sum() == 0:
+            continue
+        skel   = _skeletonize(mask)
+        chains = _trace_polylines(skel)
+        for ch in chains:
+            if len(ch) < MIN_CHAIN_LEN:
+                continue
+            simp = _simplify_chain(ch)
+            if len(simp) < 2:
+                continue
+            # Mean probability along the simplified chain — a reasonable
+            # per-polyline confidence proxy.
+            xs, ys = zip(*simp)
+            xs = np.clip(np.array(xs, dtype=np.int32), 0, orig_w - 1)
+            ys = np.clip(np.array(ys, dtype=np.int32), 0, orig_h - 1)
+            score = float(prob_map[ys, xs].mean())
             detections.append({
                 "type"  : "polyline",
-                "points": pts,
-                "score" : 1.0,
-                "label" : "polyline",
+                "points": [(float(x), float(y)) for (x, y) in simp],
+                "score" : score,
+                "label" : cname,
             })
     return detections
-
-
-def _reconstruct_polylines(verts_norm, edges, orig_w, orig_h):
-    """
-    Greedy path reconstruction from edge list.
-    Builds adjacency, then follows chains from degree-1 nodes.
-    """
-    adj = defaultdict(list)
-    for (i, j, prob) in edges:
-        adj[i].append((j, prob))
-        adj[j].append((i, prob))
-
-    visited_edges = set()
-    polylines     = []
-
-    # Start from nodes with degree 1 (endpoints) first
-    start_nodes = [n for n in adj if len(adj[n]) == 1]
-    if not start_nodes:
-        start_nodes = list(adj.keys())
-
-    visited_nodes = set()
-    for start in start_nodes:
-        if start in visited_nodes:
-            continue
-        path = [start]
-        visited_nodes.add(start)
-        current = start
-        while True:
-            neighbors = [
-                (nb, p) for (nb, p) in adj[current]
-                if (current, nb) not in visited_edges
-                and nb not in visited_nodes
-            ]
-            if not neighbors:
-                break
-            # Follow highest-confidence edge
-            next_node, _ = max(neighbors, key=lambda x: x[1])
-            visited_edges.add((current, next_node))
-            visited_edges.add((next_node, current))
-            visited_nodes.add(next_node)
-            path.append(next_node)
-            current = next_node
-
-        if len(path) >= 2:
-            pts = [
-                (verts_norm[n][0] * orig_w,
-                 verts_norm[n][1] * orig_h)
-                for n in path
-            ]
-            polylines.append(pts)
-
-    return polylines
 
 
 def run_tags(model, img_path, tag_names, device):
@@ -440,18 +375,20 @@ def draw_predictions(image, all_preds):
             if pred["type"] != "polygon":
                 continue
             color = get_color(pred["label"])
-            # NEW — apply convex hull to fix self-intersections
+            # Apply convex hull to fix self-intersections from segmentation
             pts  = np.array(pred["points"], dtype=np.int32)
             hull = cv2.convexHull(pts)
             cv2.fillPoly(overlay, [hull], color)
         output = cv2.addWeighted(overlay, MASK_ALPHA,
                                  output, 1 - MASK_ALPHA, 0)
-        # Contours
+        # Contours — recompute hull per polygon (was previously buggy:
+        # reused the last-iteration hull from the fill loop).
         for pred in all_preds:
             if pred["type"] != "polygon":
                 continue
             color = get_color(pred["label"])
             pts   = np.array(pred["points"], dtype=np.int32)
+            hull  = cv2.convexHull(pts)
             cv2.polylines(output, [hull], isClosed=True,
                           color=color, thickness=1)
 
@@ -788,12 +725,15 @@ def main():
     else:
         print(f"  ✗ Keypoint model  : not found — skipped")
 
-    if model_exists(POLYLINE_S1_PATH) and model_exists(POLYLINE_S2_PATH):
-        print(f"  ✓ Polyline model  : {POLYLINE_S1_PATH}")
-        models_loaded["polyline_s1"] = load_heatmap_model(
-            POLYLINE_S1_PATH, cfg.POLY_S1_BACKBONE
-        )
-        models_loaded["polyline_s2"] = load_edge_model(POLYLINE_S2_PATH)
+    polyline_classes    = []
+    polyline_input_size = cfg.POLY_SEG_INPUT_SIZE
+    if model_exists(POLYLINE_SEG_PATH):
+        print(f"  ✓ Polyline model  : {POLYLINE_SEG_PATH}")
+        (models_loaded["polyline_seg"],
+         polyline_classes,
+         polyline_input_size) = load_polyline_seg(POLYLINE_SEG_PATH, device)
+        print(f"    classes        : {polyline_classes}")
+        print(f"    input size     : {polyline_input_size}")
     else:
         print(f"  ✗ Polyline model  : not found — skipped")
 
@@ -823,9 +763,13 @@ def main():
             for n in names:
                 if n not in all_class_names:
                     all_class_names.append(n)
-    for t in ["keypoint", "polyline", "tag"]:
-        if t not in all_class_names:
-            all_class_names.append(t)
+    # Keypoint is currently class-agnostic (labelled "keypoint")
+    if "keypoint" not in all_class_names:
+        all_class_names.append("keypoint")
+    # Polyline-seg is per-class — give each label its own color
+    for name in polyline_classes:
+        if name not in all_class_names:
+            all_class_names.append(name)
     for name in tag_names:
         if name not in all_class_names:
             all_class_names.append(name)
@@ -883,11 +827,12 @@ def main():
             )
             all_preds.extend(preds)
 
-        # Polylines
-        if "polyline_s1" in models_loaded:
-            preds = run_polylines(
-                models_loaded["polyline_s1"],
-                models_loaded["polyline_s2"],
+        # Polylines (HRNet seg)
+        if "polyline_seg" in models_loaded:
+            preds = run_polylines_seg(
+                models_loaded["polyline_seg"],
+                polyline_classes,
+                polyline_input_size,
                 img_path, orig_h, orig_w, device
             )
             all_preds.extend(preds)
@@ -979,10 +924,8 @@ def main():
         w(f"  Device       : {device}")
         w()
         w("  Models used:")
-        for key in ["bbox", "polygon", "keypoint",
-                    "polyline_s1", "tag"]:
-            status = "✓" if key.split("_")[0] in str(models_loaded) \
-                     else "✗"
+        for key in ["bbox", "polygon", "keypoint", "polyline_seg", "tag"]:
+            status = "✓" if key in models_loaded else "✗"
             w(f"    {status}  {key}")
         w()
         w("  Results:")
