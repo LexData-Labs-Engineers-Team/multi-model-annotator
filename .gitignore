@@ -1,82 +1,32 @@
- # Python
-  __pycache__/
-  *.pyc
-  *.pyo
-  *.pyd
-  .venv/
-  venv/
-  env/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
 
-  # Model weights & training outputs
-  *.pt
-  *.pth
-  *.onnx
-  saved/
-  runs/
-  *.log
-  master_train_log.txt
-  training_summary.json
-  test_output/
+# Model weights & training outputs
+*.pt
+*.pth
+*.onnx
+saved/
+runs/
+*.log
+master_train_log.txt
+training_summary.json
+test_output/
 
-  # Datasets
-  datasets/
-  data/
-  *.zip
-  *.tar
-  *.tar.gz
+# Datasets
+datasets/
+data/
+*.zip
+*.tar
+*.tar.gz
 
-  # IDE / OS
-  .vscode/
-  .idea/
-  .DS_Store
-  Thumbs.db
-
-  Save it (Ctrl+S). If you actually want to commit the pretrained yolov8n.pt / yolov8n-seg.pt (they're ~6 MB each, GitHub-safe), remove the
-  *.pt line — but I'd recommend keeping it out and downloading weights on demand.
-
-  3. Initialize the repo (two equivalent ways)
-
-  Way A — via Source Control panel (the one you mentioned):
-
-  - Click the branch-shaped icon on the left activity bar (Ctrl + Shift + G, then G).
-  - The panel will say "The folder currently open doesn't have a git repository." Click the Initialize Repository button.
-  - The panel now shows all files under "Changes". Files matching .gitignore are hidden.
-
-  Way B — via terminal: git init. Same effect.
-
-  4. First commit — via the Source Control panel
-
-  - In the Source Control panel, hover any file under "Changes" → click the + (Stage Changes) icon. To stage everything at once, hover the
-  "Changes" header and click the + there.
-  - Type a commit message in the box at the top — e.g. Initial commit — multi-pipeline auto-labeller.
-  __pycache__/
-  *.pyc
-  *.pyo
-  *.pyd
-  .venv/
-  venv/
-  env/
-
-  # Model weights & training outputs
-  *.pt
-  *.pth
-  *.onnx
-  saved/
-  runs/
-  *.log
-  master_train_log.txt
-  training_summary.json
-  test_output/
-
-  # Datasets
-  datasets/
-  data/
-  *.zip
-  *.tar
-  *.tar.gz
-
-  # IDE / OS
-  .vscode/
-  .idea/
-  .DS_Store
-  Thumbs.db
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
