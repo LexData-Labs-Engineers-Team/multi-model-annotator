@@ -1,0 +1,1032 @@
+# ============================================================
+# master_test.py — Inference & Annotation Pipeline
+# ============================================================
+# Runs all configured models on a folder of images.
+# Outputs:
+#   - Annotated images (all annotation types drawn on one image)
+#   - CVAT XML 1.1 file (reimportable into CVAT)
+#   - COCO JSON of all predictions
+#   - Per-image stats CSV
+#   - Summary report
+#
+# Run: python master_test.py
+# ============================================================
+
+import os
+import sys
+import cv2
+import json
+import csv
+import glob
+import time
+import datetime
+import numpy as np
+from PIL import Image
+from collections import defaultdict
+
+import torch
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config as cfg
+
+# ============================================================
+# --- USER SETTINGS — Edit before running ---
+# ============================================================
+
+# Folder of images to run inference on
+IMAGES_DIR      = "/home/lexdata/Documents/LexAnnotate_demo/m_env/multi_pipeline/datasets/bonsai_v2/images"
+
+# Output folder
+OUTPUT_DIR      = os.path.join(cfg.SAVE_DIR, "test_output")
+
+# ---- Model paths — set to None to skip that model ----
+BBOX_MODEL_PATH     = os.path.join(cfg.BBOX_SAVE_DIR,
+                                   "train", "weights", "best.pt")
+POLYGON_MODEL_PATH  = os.path.join(cfg.POLYGON_SAVE_DIR,
+                                   "train", "weights", "best.pt")
+KEYPOINT_MODEL_PATH = os.path.join(cfg.KEYPOINT_SAVE_DIR, "best.pt")
+POLYLINE_S1_PATH    = os.path.join(cfg.POLYLINE_SAVE_DIR, "s1_best.pt")
+POLYLINE_S2_PATH    = os.path.join(cfg.POLYLINE_SAVE_DIR, "s2_best.pt")
+TAG_MODEL_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "best.pt")
+TAG_NAMES_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "tag_names.json")
+
+# ---- Inference thresholds ----
+BBOX_SCORE_THRESH   = cfg.YOLO_SCORE_THRESH
+POLY_SCORE_THRESH   = cfg.YOLO_SCORE_THRESH
+KP_SCORE_THRESH     = cfg.KP_SCORE_THRESH
+POLY_S1_THRESH      = cfg.POLY_S1_SCORE_THRESH
+EDGE_THRESH         = 0.4       # edge connectivity confidence — lowered from 0.8
+TAG_THRESH          = cfg.TAG_SCORE_THRESH
+
+# ---- Visualization settings ----
+DRAW_BOXES          = True
+DRAW_MASKS          = True
+DRAW_KEYPOINTS      = True
+DRAW_POLYLINES      = True
+DRAW_TAGS           = True
+MASK_ALPHA          = 0.40
+BOX_THICKNESS       = 2
+KP_RADIUS           = 5
+POLY_THICKNESS      = 2
+FONT_SCALE          = 0.50
+LABEL_THICKNESS     = 1
+
+# Supported image extensions
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
+
+# ============================================================
+# --- Color palette (BGR) — one per class index ---
+# ============================================================
+
+_PALETTE = [
+    (  0, 229, 160), (  0, 153, 255), (255, 107,  53),
+    (192, 132, 252), (255, 215,   0), (255,  99, 132),
+    ( 75, 192, 192), (255, 159,  64), (153, 102, 255),
+    ( 54, 162, 235), (255, 206,  86), ( 46, 204, 113),
+    (231,  76,  60), ( 52, 152, 219), (155,  89, 182),
+]
+
+# Built once from class names — same color per class across all images
+CLASS_COLOR_MAP = {}
+
+def build_color_map(class_names):
+    global CLASS_COLOR_MAP
+    CLASS_COLOR_MAP = {
+        name: _PALETTE[i % len(_PALETTE)]
+        for i, name in enumerate(class_names)
+    }
+
+def get_color(class_name):
+    return CLASS_COLOR_MAP.get(class_name, (200, 200, 200))
+
+
+# ============================================================
+# --- Model loading helpers ---
+# ============================================================
+
+def model_exists(path):
+    return path is not None and os.path.exists(path)
+
+
+def load_yolo(path):
+    from ultralytics import YOLO
+    model = YOLO(path)
+    return model
+
+
+def load_heatmap_model(path, backbone):
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "keypoint_model"
+    ))
+    from train_keypoint import KeypointHeatmapModel
+    ckpt  = torch.load(path, map_location="cpu")
+    model = KeypointHeatmapModel(backbone=backbone, pretrained=False)
+    state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+    model.load_state_dict(state)
+    model.eval()
+    return model
+
+
+def load_edge_model(path):
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "polyline_model"
+    ))
+    from train_polyline_s2 import EdgeMLP
+    ckpt  = torch.load(path, map_location="cpu")
+    model = EdgeMLP(hidden_dim=cfg.POLY_S2_HIDDEN_DIM)
+    state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+    model.load_state_dict(state)
+    model.eval()
+    return model
+
+
+def load_tag_model(path, num_tags):
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "tag_model"
+    ))
+    from train_tag import TagClassifier
+    ckpt  = torch.load(path, map_location="cpu")
+    model = TagClassifier(num_tags=num_tags, pretrained=False)
+    state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+    model.load_state_dict(state)
+    model.eval()
+    return model
+
+
+# ============================================================
+# --- Image preprocessing ---
+# ============================================================
+
+def preprocess(img_path, size):
+    orig = cv2.imread(img_path)
+    if orig is None:
+        return None, None, None, None
+    orig_h, orig_w = orig.shape[:2]
+    pil  = Image.fromarray(cv2.cvtColor(orig, cv2.COLOR_BGR2RGB))
+    pil  = pil.resize((size, size), Image.BILINEAR)
+    t    = TF.to_tensor(pil)
+    t    = TF.normalize(t, cfg.PIXEL_MEAN, cfg.PIXEL_STD)
+    t    = t.unsqueeze(0)
+    return t, orig, orig_h, orig_w
+
+
+# ============================================================
+# --- Inference per model ---
+# ============================================================
+
+def run_bbox(model, img_path, orig_h, orig_w, class_names):
+    results = model.predict(
+        source  = img_path,
+        imgsz   = cfg.INPUT_SIZE,
+        conf    = BBOX_SCORE_THRESH,
+        iou     = cfg.YOLO_NMS_THRESH,
+        device  = cfg.DEVICE,
+        verbose = False,
+    )
+    detections = []
+    for r in results:
+        boxes = r.boxes
+        if boxes is None:
+            continue
+        for i in range(len(boxes)):
+            x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().tolist()
+            score  = float(boxes.conf[i].cpu())
+            cls_id = int(boxes.cls[i].cpu())
+            name   = class_names[cls_id] if cls_id < len(class_names) \
+                     else f"class_{cls_id}"
+            detections.append({
+                "type" : "bbox",
+                "box"  : [x1, y1, x2, y2],
+                "score": score,
+                "label": name,
+            })
+    return detections
+
+
+def run_polygon(model, img_path, orig_h, orig_w, class_names):
+    results = model.predict(
+        source  = img_path,
+        imgsz   = cfg.INPUT_SIZE,
+        conf    = POLY_SCORE_THRESH,
+        iou     = cfg.YOLO_NMS_THRESH,
+        device  = cfg.DEVICE,
+        verbose = False,
+    )
+    detections = []
+    for r in results:
+        if r.masks is None:
+            continue
+        boxes = r.boxes
+        for i in range(len(r.masks)):
+            # Mask polygon contour in original image coords
+            mask_xy = r.masks.xy[i]   # (N, 2) pixel coords
+            if len(mask_xy) < 3:
+                continue
+            # Scale to original image size
+            scale_x = orig_w / r.orig_shape[1]
+            scale_y = orig_h / r.orig_shape[0]
+            pts     = [(float(p[0] * scale_x),
+                        float(p[1] * scale_y)) for p in mask_xy]
+            score   = float(boxes.conf[i].cpu()) if boxes else 1.0
+            cls_id  = int(boxes.cls[i].cpu())    if boxes else 0
+            name    = class_names[cls_id] if cls_id < len(class_names) \
+                      else f"class_{cls_id}"
+            detections.append({
+                "type"  : "polygon",
+                "points": pts,
+                "score" : score,
+                "label" : name,
+            })
+    return detections
+
+
+def run_keypoints(model, img_path, orig_h, orig_w, device):
+    tensor, _, _, _ = preprocess(img_path, cfg.INPUT_SIZE)
+    if tensor is None:
+        return []
+    tensor = tensor.to(device)
+    with torch.no_grad():
+        heatmap = model(tensor)
+        heatmap = F.interpolate(
+            heatmap, size=(orig_h, orig_w),
+            mode="bilinear", align_corners=False
+        )
+        heatmap = heatmap.sigmoid().squeeze().cpu().numpy()
+
+    # Extract local maxima as keypoints
+    from scipy.ndimage import maximum_filter
+    from scipy.ndimage import label as ndlabel
+    local_max = (heatmap == maximum_filter(heatmap, size=100))
+    above_thresh = heatmap > KP_SCORE_THRESH
+    peaks = local_max & above_thresh
+    coords = np.argwhere(peaks)   # (N, 2) in (y, x)
+
+    detections = []
+    for (y, x) in coords:
+        detections.append({
+            "type" : "keypoint",
+            "x"    : float(x),
+            "y"    : float(y),
+            "score": float(heatmap[y, x]),
+            "label": "keypoint",
+        })
+    return detections
+
+
+def run_polylines(s1_model, s2_model, img_path,
+                  orig_h, orig_w, device):
+    tensor, _, _, _ = preprocess(img_path, cfg.INPUT_SIZE)
+    if tensor is None:
+        return []
+    tensor = tensor.to(device)
+
+    # Stage 1 — detect vertices
+    with torch.no_grad():
+        heatmap = s1_model(tensor)
+        heatmap = F.interpolate(
+            heatmap, size=(orig_h, orig_w),
+            mode="bilinear", align_corners=False
+        )
+        heatmap = heatmap.sigmoid().squeeze().cpu().numpy()
+
+    from scipy.ndimage import maximum_filter
+    local_max    = (heatmap == maximum_filter(heatmap, size=35))
+    above_thresh = heatmap > POLY_S1_THRESH
+    peaks        = local_max & above_thresh
+    coords       = np.argwhere(peaks)   # (N, 2) in (y, x)
+
+    if len(coords) < 2:
+        print(f"    [polyline] Only {len(coords)} vertex peaks found "
+              f"(need >=2) — try lowering POLY_S1_THRESH")
+        return []
+
+    print(f"    [polyline] {len(coords)} vertex peaks detected")
+    # Normalize coords for edge model
+    verts_norm = [(float(x) / orig_w, float(y) / orig_h)
+                  for (y, x) in coords]
+
+    # Use a generous max dist — cfg value may be too restrictive
+    # for the actual scale of polylines in the image
+    max_dist = max(cfg.POLY_S2_MAX_DIST, 0.3)
+
+    # Stage 2 — predict edges
+    from train_polyline_s2 import build_edge_features
+    edges = []
+    for i in range(len(verts_norm)):
+        for j in range(len(verts_norm)):
+            if i == j:
+                continue
+            x1, y1 = verts_norm[i]
+            x2, y2 = verts_norm[j]
+            dist   = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+            if dist > max_dist:
+                continue
+            feat  = build_edge_features(x1, y1, x2, y2)
+            feat_t= torch.tensor(feat, dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                logit = s2_model(feat_t)
+                prob  = logit.sigmoid().item()
+            if prob > EDGE_THRESH:
+                edges.append((i, j, prob))
+
+    if not edges:
+        print(f"    [polyline] No edges passed threshold {EDGE_THRESH} "
+              f"— try lowering EDGE_THRESH or POLY_S2_MAX_DIST")
+        return []
+
+    print(f"    [polyline] {len(edges)} edges found, reconstructing polylines...")
+    # Reconstruct polylines via greedy path following
+    polylines = _reconstruct_polylines(verts_norm, edges, orig_w, orig_h)
+    detections = []
+    for pts in polylines:
+        if len(pts) >= 2:
+            detections.append({
+                "type"  : "polyline",
+                "points": pts,
+                "score" : 1.0,
+                "label" : "polyline",
+            })
+    return detections
+
+
+def _reconstruct_polylines(verts_norm, edges, orig_w, orig_h):
+    """
+    Greedy path reconstruction from edge list.
+    Builds adjacency, then follows chains from degree-1 nodes.
+    """
+    adj = defaultdict(list)
+    for (i, j, prob) in edges:
+        adj[i].append((j, prob))
+        adj[j].append((i, prob))
+
+    visited_edges = set()
+    polylines     = []
+
+    # Start from nodes with degree 1 (endpoints) first
+    start_nodes = [n for n in adj if len(adj[n]) == 1]
+    if not start_nodes:
+        start_nodes = list(adj.keys())
+
+    visited_nodes = set()
+    for start in start_nodes:
+        if start in visited_nodes:
+            continue
+        path = [start]
+        visited_nodes.add(start)
+        current = start
+        while True:
+            neighbors = [
+                (nb, p) for (nb, p) in adj[current]
+                if (current, nb) not in visited_edges
+                and nb not in visited_nodes
+            ]
+            if not neighbors:
+                break
+            # Follow highest-confidence edge
+            next_node, _ = max(neighbors, key=lambda x: x[1])
+            visited_edges.add((current, next_node))
+            visited_edges.add((next_node, current))
+            visited_nodes.add(next_node)
+            path.append(next_node)
+            current = next_node
+
+        if len(path) >= 2:
+            pts = [
+                (verts_norm[n][0] * orig_w,
+                 verts_norm[n][1] * orig_h)
+                for n in path
+            ]
+            polylines.append(pts)
+
+    return polylines
+
+
+def run_tags(model, img_path, tag_names, device):
+    tensor, _, _, _ = preprocess(img_path, cfg.INPUT_SIZE)
+    if tensor is None:
+        return []
+    tensor = tensor.to(device)
+    with torch.no_grad():
+        logits = model(tensor)
+        probs  = logits.sigmoid().squeeze()
+        probs  = np.atleast_1d(probs.cpu().numpy())  # ← guarantees 1D
+
+    detections = []
+    for i, name in enumerate(tag_names):
+        if probs[i] > TAG_THRESH:
+            detections.append({
+                "type" : "tag",
+                "label": name,
+                "score": float(probs[i]),
+            })
+    return detections
+
+
+# ============================================================
+# --- Visualization ---
+# ============================================================
+
+def draw_predictions(image, all_preds):
+    output = image.copy()
+
+    # --- Masks (drawn first, under everything) ---
+    if DRAW_MASKS:
+        overlay = output.copy()
+        for pred in all_preds:
+            if pred["type"] != "polygon":
+                continue
+            color = get_color(pred["label"])
+            # NEW — apply convex hull to fix self-intersections
+            pts  = np.array(pred["points"], dtype=np.int32)
+            hull = cv2.convexHull(pts)
+            cv2.fillPoly(overlay, [hull], color)
+        output = cv2.addWeighted(overlay, MASK_ALPHA,
+                                 output, 1 - MASK_ALPHA, 0)
+        # Contours
+        for pred in all_preds:
+            if pred["type"] != "polygon":
+                continue
+            color = get_color(pred["label"])
+            pts   = np.array(pred["points"], dtype=np.int32)
+            cv2.polylines(output, [hull], isClosed=True,
+                          color=color, thickness=1)
+
+    # --- Bounding boxes ---
+    if DRAW_BOXES:
+        for pred in all_preds:
+            if pred["type"] != "bbox":
+                continue
+            color        = get_color(pred["label"])
+            x1,y1,x2,y2 = [int(v) for v in pred["box"]]
+            cv2.rectangle(output, (x1, y1), (x2, y2),
+                          color, BOX_THICKNESS)
+            _draw_label(output, pred["label"], pred["score"],
+                        x1, y1, color)
+
+    # --- Polylines ---
+    if DRAW_POLYLINES:
+        for pred in all_preds:
+            if pred["type"] != "polyline":
+                continue
+            color = get_color(pred["label"])
+            pts   = [(int(p[0]), int(p[1])) for p in pred["points"]]
+            for k in range(len(pts) - 1):
+                cv2.line(output, pts[k], pts[k + 1],
+                         color, POLY_THICKNESS)
+            # Draw vertex dots
+            for pt in pts:
+                cv2.circle(output, pt, 3, color, -1)
+            # Label at first point
+            if pts:
+                _draw_label(output, pred["label"], pred["score"],
+                            pts[0][0], pts[0][1], color)
+
+    # --- Keypoints ---
+    if DRAW_KEYPOINTS:
+        for pred in all_preds:
+            if pred["type"] != "keypoint":
+                continue
+            color = get_color(pred["label"])
+            cx    = int(pred["x"])
+            cy    = int(pred["y"])
+            cv2.circle(output, (cx, cy), KP_RADIUS, color, -1)
+            cv2.circle(output, (cx, cy), KP_RADIUS + 1, (0, 0, 0), 1)
+
+    # --- Tags (drawn as text block in top-left corner) ---
+    if DRAW_TAGS:
+        tag_preds = [p for p in all_preds if p["type"] == "tag"]
+        if tag_preds:
+            y_offset = 20
+            for pred in tag_preds:
+                color = get_color(pred["label"])
+                text  = f"[TAG] {pred['label']} " \
+                        f"{pred['score']*100:.0f}%"
+                (tw, th), _ = cv2.getTextSize(
+                    text, cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, 1
+                )
+                cv2.rectangle(output,
+                              (8, y_offset - th - 4),
+                              (8 + tw + 4, y_offset + 2),
+                              color, -1)
+                cv2.putText(output, text, (10, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            FONT_SCALE, (0, 0, 0), LABEL_THICKNESS,
+                            cv2.LINE_AA)
+                y_offset += th + 8
+
+    # --- Polygon labels (drawn last, on top) ---
+    for pred in all_preds:
+        if pred["type"] != "polygon":
+            continue
+        color = get_color(pred["label"])
+        pts   = pred["points"]
+        if pts:
+            cx = int(sum(p[0] for p in pts) / len(pts))
+            cy = int(sum(p[1] for p in pts) / len(pts))
+            _draw_label(output, pred["label"], pred["score"],
+                        cx, cy, color)
+
+    return output
+
+
+def _draw_label(img, label, score, x, y, color):
+    text        = f"{label} {score*100:.0f}%"
+    (tw, th), _ = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, 1
+    )
+    y = max(y, th + 8)
+    cv2.rectangle(img,
+                  (x, y - th - 6),
+                  (x + tw + 4, y),
+                  color, -1)
+    cv2.putText(img, text, (x + 2, y - 3),
+                cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE,
+                (0, 0, 0), LABEL_THICKNESS, cv2.LINE_AA)
+
+
+# ============================================================
+# --- CVAT XML 1.1 builder ---
+# ============================================================
+
+def build_cvat_xml(all_image_preds, images_meta):
+    """
+    Builds a CVAT for Images 1.1 XML tree from all predictions.
+
+    all_image_preds : dict — filename → list of prediction dicts
+    images_meta     : dict — filename → {width, height}
+    """
+    root = ET.Element("annotations")
+    ET.SubElement(root, "version").text = "1.1"
+
+    # Meta block
+    meta  = ET.SubElement(root, "meta")
+    task  = ET.SubElement(meta, "task")
+    ET.SubElement(task, "name").text = "LexAnnotate Predictions"
+    ET.SubElement(task, "size").text = str(len(all_image_preds))
+    ET.SubElement(task, "mode").text = "annotation"
+    labels_el = ET.SubElement(task, "labels")
+
+    # Collect all unique label names across all predictions
+    all_labels = set()
+    for preds in all_image_preds.values():
+        for p in preds:
+            all_labels.add(p["label"])
+    for lname in sorted(all_labels):
+        lbl = ET.SubElement(labels_el, "label")
+        ET.SubElement(lbl, "name").text   = lname
+        ET.SubElement(lbl, "color").text  = "#ffffff"
+        ET.SubElement(lbl, "type").text   = "any"
+
+    # Image blocks
+    for img_id, (fname, preds) in enumerate(all_image_preds.items()):
+        meta_info = images_meta.get(fname, {})
+        w = meta_info.get("width",  0)
+        h = meta_info.get("height", 0)
+
+        img_el = ET.SubElement(root, "image")
+        img_el.set("id",     str(img_id))
+        img_el.set("name",   fname)
+        img_el.set("width",  str(w))
+        img_el.set("height", str(h))
+
+        for pred in preds:
+            ptype = pred["type"]
+            label = pred["label"]
+            score = str(round(pred["score"], 4))
+
+            if ptype == "bbox":
+                x1, y1, x2, y2 = pred["box"]
+                el = ET.SubElement(img_el, "box")
+                el.set("label",  label)
+                el.set("xtl",    f"{x1:.2f}")
+                el.set("ytl",    f"{y1:.2f}")
+                el.set("xbr",    f"{x2:.2f}")
+                el.set("ybr",    f"{y2:.2f}")
+                el.set("occluded", "0")
+                _add_attr(el, "score", score)
+
+            elif ptype == "polygon":
+                pts_str = _pts_to_str(pred["points"])
+                el = ET.SubElement(img_el, "polygon")
+                el.set("label",  label)
+                el.set("points", pts_str)
+                el.set("occluded", "0")
+                _add_attr(el, "score", score)
+
+            elif ptype == "polyline":
+                pts_str = _pts_to_str(pred["points"])
+                el = ET.SubElement(img_el, "polyline")
+                el.set("label",  label)
+                el.set("points", pts_str)
+                el.set("occluded", "0")
+                _add_attr(el, "score", score)
+
+            elif ptype == "keypoint":
+                el = ET.SubElement(img_el, "points")
+                el.set("label",  label)
+                el.set("points", f"{pred['x']:.2f},{pred['y']:.2f}")
+                el.set("occluded", "0")
+                _add_attr(el, "score", score)
+
+            elif ptype == "tag":
+                el = ET.SubElement(img_el, "tag")
+                el.set("label",  label)
+                _add_attr(el, "score", score)
+
+    return root
+
+
+def _pts_to_str(points):
+    return ";".join(f"{p[0]:.2f},{p[1]:.2f}" for p in points)
+
+
+def _add_attr(parent, name, value):
+    attr = ET.SubElement(parent, "attribute")
+    attr.set("name", name)
+    attr.text = value
+
+
+def prettify_xml(root):
+    raw     = ET.tostring(root, encoding="unicode")
+    reparsed= minidom.parseString(raw)
+    return reparsed.toprettyxml(indent="  ", encoding=None)
+
+
+# ============================================================
+# --- COCO JSON builder ---
+# ============================================================
+
+def build_coco_json(all_image_preds, images_meta, class_names):
+    coco = {
+        "info"       : {"description": "LexAnnotate predictions"},
+        "categories" : [{"id": i + 1, "name": n}
+                        for i, n in enumerate(class_names)],
+        "images"     : [],
+        "annotations": []
+    }
+    cat_map   = {n: i + 1 for i, n in enumerate(class_names)}
+    ann_id    = 1
+    for img_id, (fname, preds) in enumerate(
+        all_image_preds.items(), start=1
+    ):
+        meta = images_meta.get(fname, {})
+        coco["images"].append({
+            "id"       : img_id,
+            "file_name": fname,
+            "width"    : meta.get("width",  0),
+            "height"   : meta.get("height", 0),
+        })
+        for pred in preds:
+            ptype    = pred["type"]
+            label    = pred["label"]
+            cat_id   = cat_map.get(label, 1)
+
+            ann = {
+                "id"          : ann_id,
+                "image_id"    : img_id,
+                "category_id" : cat_id,
+                "score"       : round(pred["score"], 4),
+                "shape_type"  : ptype,
+                "iscrowd"     : 0,
+            }
+
+            if ptype == "bbox":
+                x1, y1, x2, y2 = pred["box"]
+                ann["bbox"]        = [x1, y1, x2 - x1, y2 - y1]
+                ann["area"]        = (x2 - x1) * (y2 - y1)
+                ann["segmentation"]= []
+
+            elif ptype == "polygon":
+                flat = [v for p in pred["points"] for v in p]
+                ann["segmentation"] = [flat]
+                x1  = min(p[0] for p in pred["points"])
+                y1  = min(p[1] for p in pred["points"])
+                x2  = max(p[0] for p in pred["points"])
+                y2  = max(p[1] for p in pred["points"])
+                ann["bbox"] = [x1, y1, x2 - x1, y2 - y1]
+                ann["area"] = (x2 - x1) * (y2 - y1)
+
+            elif ptype == "polyline":
+                flat = [v for p in pred["points"] for v in p]
+                ann["segmentation"] = [flat]
+                ann["bbox"]         = []
+                ann["area"]         = 0
+
+            elif ptype == "keypoint":
+                ann["keypoints"]    = [pred["x"], pred["y"], 2]
+                ann["bbox"]         = []
+                ann["segmentation"] = []
+                ann["area"]         = 0
+
+            elif ptype == "tag":
+                ann["bbox"]         = []
+                ann["segmentation"] = []
+                ann["area"]         = 0
+
+            coco["annotations"].append(ann)
+            ann_id += 1
+
+    return coco
+
+
+# ============================================================
+# --- Main ---
+# ============================================================
+
+def main():
+    print("\n" + "═" * 55)
+    print("  LexAnnotate — Inference Pipeline")
+    print("═" * 55)
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(os.path.join(OUTPUT_DIR, "annotated"), exist_ok=True)
+
+    device = torch.device(
+        cfg.DEVICE if torch.cuda.is_available()
+        or cfg.DEVICE == "cpu" else "cpu"
+    )
+    print(f"  Device : {device}")
+
+    # --------------------------------------------------------
+    # Collect images
+    # --------------------------------------------------------
+    image_paths = sorted([
+        p for ext in IMAGE_EXTS
+        for p in glob.glob(os.path.join(IMAGES_DIR, f"*{ext}"))
+    ])
+    assert len(image_paths) > 0, \
+        f"No images found in: {IMAGES_DIR}"
+    print(f"  Images : {len(image_paths)} found")
+
+    # --------------------------------------------------------
+    # Load models — only those whose paths exist
+    # --------------------------------------------------------
+    print("\n--- Loading models ---")
+    models_loaded = {}
+
+    if model_exists(BBOX_MODEL_PATH):
+        print(f"  ✓ Bbox model      : {BBOX_MODEL_PATH}")
+        models_loaded["bbox"] = load_yolo(BBOX_MODEL_PATH)
+    else:
+        print(f"  ✗ Bbox model      : not found — skipped")
+
+    if model_exists(POLYGON_MODEL_PATH):
+        print(f"  ✓ Polygon model   : {POLYGON_MODEL_PATH}")
+        models_loaded["polygon"] = load_yolo(POLYGON_MODEL_PATH)
+    else:
+        print(f"  ✗ Polygon model   : not found — skipped")
+
+    if model_exists(KEYPOINT_MODEL_PATH):
+        print(f"  ✓ Keypoint model  : {KEYPOINT_MODEL_PATH}")
+        models_loaded["keypoint"] = load_heatmap_model(
+            KEYPOINT_MODEL_PATH, cfg.KP_BACKBONE
+        )
+    else:
+        print(f"  ✗ Keypoint model  : not found — skipped")
+
+    if model_exists(POLYLINE_S1_PATH) and model_exists(POLYLINE_S2_PATH):
+        print(f"  ✓ Polyline model  : {POLYLINE_S1_PATH}")
+        models_loaded["polyline_s1"] = load_heatmap_model(
+            POLYLINE_S1_PATH, cfg.POLY_S1_BACKBONE
+        )
+        models_loaded["polyline_s2"] = load_edge_model(POLYLINE_S2_PATH)
+    else:
+        print(f"  ✗ Polyline model  : not found — skipped")
+
+    tag_names = []
+    if model_exists(TAG_MODEL_PATH) and model_exists(TAG_NAMES_PATH):
+        with open(TAG_NAMES_PATH) as f:
+            tag_names = json.load(f)
+        print(f"  ✓ Tag model       : {TAG_MODEL_PATH} "
+              f"({len(tag_names)} tags)")
+        models_loaded["tag"] = load_tag_model(
+            TAG_MODEL_PATH, len(tag_names)
+        )
+    else:
+        print(f"  ✗ Tag model       : not found — skipped")
+
+    if not models_loaded:
+        print("\n  ERROR: No models found. Check paths in USER SETTINGS.")
+        return
+
+    # Collect all class names across YOLO models for color map
+    all_class_names = []
+    for key in ["bbox", "polygon"]:
+        if key in models_loaded:
+            names = models_loaded[key].names
+            if isinstance(names, dict):
+                names = [names[i] for i in sorted(names)]
+            for n in names:
+                if n not in all_class_names:
+                    all_class_names.append(n)
+    for t in ["keypoint", "polyline", "tag"]:
+        if t not in all_class_names:
+            all_class_names.append(t)
+    for name in tag_names:
+        if name not in all_class_names:
+            all_class_names.append(name)
+
+    build_color_map(all_class_names)
+
+    # --------------------------------------------------------
+    # Inference loop
+    # --------------------------------------------------------
+    print(f"\n--- Running inference ---")
+    all_image_preds = {}   # filename → list of preds
+    images_meta     = {}   # filename → {width, height}
+    per_img_stats   = []
+    infer_start     = time.time()
+
+    for img_path in image_paths:
+        fname    = os.path.basename(img_path)
+        orig_img = cv2.imread(img_path)
+        if orig_img is None:
+            print(f"  Skipping unreadable: {fname}")
+            continue
+
+        orig_h, orig_w = orig_img.shape[:2]
+        images_meta[fname] = {"width": orig_w, "height": orig_h}
+
+        all_preds = []
+
+        # Bbox
+        if "bbox" in models_loaded:
+            names = models_loaded["bbox"].names
+            if isinstance(names, dict):
+                names = [names[i] for i in sorted(names)]
+            preds = run_bbox(
+                models_loaded["bbox"], img_path,
+                orig_h, orig_w, names
+            )
+            all_preds.extend(preds)
+
+        # Polygon
+        if "polygon" in models_loaded:
+            names = models_loaded["polygon"].names
+            if isinstance(names, dict):
+                names = [names[i] for i in sorted(names)]
+            preds = run_polygon(
+                models_loaded["polygon"], img_path,
+                orig_h, orig_w, names
+            )
+            all_preds.extend(preds)
+
+        # Keypoints
+        if "keypoint" in models_loaded:
+            preds = run_keypoints(
+                models_loaded["keypoint"], img_path,
+                orig_h, orig_w, device
+            )
+            all_preds.extend(preds)
+
+        # Polylines
+        if "polyline_s1" in models_loaded:
+            preds = run_polylines(
+                models_loaded["polyline_s1"],
+                models_loaded["polyline_s2"],
+                img_path, orig_h, orig_w, device
+            )
+            all_preds.extend(preds)
+
+        # Tags
+        if "tag" in models_loaded:
+            preds = run_tags(
+                models_loaded["tag"], img_path,
+                tag_names, device
+            )
+            all_preds.extend(preds)
+
+        all_image_preds[fname] = all_preds
+
+        # Draw and save annotated image
+        annotated = draw_predictions(orig_img, all_preds)
+        cv2.imwrite(
+            os.path.join(OUTPUT_DIR, "annotated", fname), annotated
+        )
+
+        # Stats
+        type_counts = defaultdict(int)
+        for p in all_preds:
+            type_counts[p["type"]] += 1
+        per_img_stats.append({
+            "image"     : fname,
+            "total"     : len(all_preds),
+            "bbox"      : type_counts["bbox"],
+            "polygon"   : type_counts["polygon"],
+            "keypoint"  : type_counts["keypoint"],
+            "polyline"  : type_counts["polyline"],
+            "tag"       : type_counts["tag"],
+        })
+
+        print(f"  {fname:<35} "
+              f"bbox:{type_counts['bbox']} "
+              f"poly:{type_counts['polygon']} "
+              f"kp:{type_counts['keypoint']} "
+              f"pl:{type_counts['polyline']} "
+              f"tag:{type_counts['tag']}")
+
+    # --------------------------------------------------------
+    # Save CVAT XML
+    # --------------------------------------------------------
+    xml_root = build_cvat_xml(all_image_preds, images_meta)
+    xml_str  = prettify_xml(xml_root)
+    xml_path = os.path.join(OUTPUT_DIR, "predictions_cvat.xml")
+    with open(xml_path, "w", encoding="utf-8") as f:
+        f.write(xml_str)
+
+    # --------------------------------------------------------
+    # Save COCO JSON
+    # --------------------------------------------------------
+    coco      = build_coco_json(
+        all_image_preds, images_meta, all_class_names
+    )
+    coco_path = os.path.join(OUTPUT_DIR, "predictions_coco.json")
+    with open(coco_path, "w") as f:
+        json.dump(coco, f, indent=2)
+
+    # --------------------------------------------------------
+    # Save per-image stats CSV
+    # --------------------------------------------------------
+    stats_path = os.path.join(OUTPUT_DIR, "per_image_stats.csv")
+    with open(stats_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "image", "total", "bbox", "polygon",
+            "keypoint", "polyline", "tag"
+        ])
+        writer.writeheader()
+        writer.writerows(per_img_stats)
+
+    # --------------------------------------------------------
+    # Save summary report
+    # --------------------------------------------------------
+    total_time    = time.time() - infer_start
+    total_dets    = sum(s["total"] for s in per_img_stats)
+    summary_path  = os.path.join(OUTPUT_DIR, "summary_report.txt")
+
+    with open(summary_path, "w") as f:
+        def w(line=""):
+            f.write(line + "\n")
+        w("═" * 55)
+        w("  LexAnnotate — Inference Summary")
+        w("═" * 55)
+        w(f"  Date         : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        w(f"  Images dir   : {IMAGES_DIR}")
+        w(f"  Output dir   : {OUTPUT_DIR}")
+        w(f"  Device       : {device}")
+        w()
+        w("  Models used:")
+        for key in ["bbox", "polygon", "keypoint",
+                    "polyline_s1", "tag"]:
+            status = "✓" if key.split("_")[0] in str(models_loaded) \
+                     else "✗"
+            w(f"    {status}  {key}")
+        w()
+        w("  Results:")
+        w(f"    Images processed : {len(per_img_stats)}")
+        w(f"    Total detections : {total_dets}")
+        w(f"    Avg per image    : "
+          f"{total_dets / max(len(per_img_stats), 1):.1f}")
+        w()
+        w("  Detections by type:")
+        for t in ["bbox", "polygon", "keypoint", "polyline", "tag"]:
+            n = sum(s[t] for s in per_img_stats)
+            w(f"    {t:<12}: {n}")
+        w()
+        w(f"  Total time       : "
+          f"{str(datetime.timedelta(seconds=int(total_time)))}")
+        w(f"  Avg per image    : "
+          f"{total_time / max(len(image_paths), 1):.2f}s")
+        w()
+        w("  Output files:")
+        w(f"    Annotated images : {OUTPUT_DIR}/annotated/")
+        w(f"    CVAT XML         : {xml_path}")
+        w(f"    COCO JSON        : {coco_path}")
+        w(f"    Per-image stats  : {stats_path}")
+        w(f"    This report      : {summary_path}")
+        w("═" * 55)
+
+    # --------------------------------------------------------
+    # Final print
+    # --------------------------------------------------------
+    print(f"\n{'═'*55}")
+    print(f"  Inference Complete")
+    print(f"{'─'*55}")
+    print(f"  Images processed : {len(per_img_stats)}")
+    print(f"  Total detections : {total_dets}")
+    print(f"  Total time       : "
+          f"{str(datetime.timedelta(seconds=int(total_time)))}")
+    print(f"{'─'*55}")
+    print(f"  Annotated images : {OUTPUT_DIR}/annotated/")
+    print(f"  CVAT XML         : {xml_path}")
+    print(f"  COCO JSON        : {coco_path}")
+    print(f"  Per-image stats  : {stats_path}")
+    print(f"  Summary report   : {summary_path}")
+    print(f"{'═'*55}\n")
+
+
+if __name__ == "__main__":
+    main()
