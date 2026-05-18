@@ -1,0 +1,35 @@
+# ============================================================
+# requirements.txt — multi_pipeline auto-labeller
+# ============================================================
+# Install:
+#   pip install -r requirements.txt
+#
+# CUDA NOTE
+# ---------
+# The --extra-index-url line below pulls PyTorch from the CUDA 12.1
+# wheel channel. Pip picks the +cu121 wheels over the CPU-only PyPI
+# wheels because +cu121 is a higher local-version label per PEP 440.
+#
+# If your driver requires a different CUDA version (check `nvidia-smi`):
+#   cu118  →  https://download.pytorch.org/whl/cu118
+#   cu124  →  https://download.pytorch.org/whl/cu124
+#   CPU    →  https://download.pytorch.org/whl/cpu
+# Replace the URL below and re-run pip install.
+# ============================================================
+
+--index-url https://download.pytorch.org/whl/cu126
+
+# --- Deep learning ---
+torch
+torchvision
+timm
+ultralytics
+
+# --- Numerics ---
+#numpy
+#scipy
+
+# --- Image processing ---
+opencv-contrib-python
+Pillow
+scikit-image
