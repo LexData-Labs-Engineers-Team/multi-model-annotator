@@ -49,6 +49,7 @@ BBOX_MODEL_PATH     = os.path.join(cfg.BBOX_SAVE_DIR,
 POLYGON_MODEL_PATH  = os.path.join(cfg.POLYGON_SAVE_DIR,
                                    "train", "weights", "best.pt")
 KEYPOINT_MODEL_PATH = os.path.join(cfg.KEYPOINT_SAVE_DIR, "best.pt")
+KEYPOINT_SEG_PATH   = os.path.join(cfg.KEYPOINT_SAVE_DIR, "best_seg.pt")
 POLYLINE_SEG_PATH   = os.path.join(cfg.POLYLINE_SAVE_DIR, "best_seg.pt")
 TAG_MODEL_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "best.pt")
 TAG_NAMES_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "tag_names.json")
@@ -57,8 +58,15 @@ TAG_NAMES_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "tag_names.json")
 BBOX_SCORE_THRESH   = cfg.YOLO_SCORE_THRESH
 POLY_SCORE_THRESH   = cfg.YOLO_SCORE_THRESH
 KP_SCORE_THRESH     = cfg.KP_SCORE_THRESH
+KP_SEG_THRESH       = cfg.KP_SEG_THRESH
+KP_SEG_NMS_MIN_DIST = cfg.KP_SEG_NMS_MIN_DIST
 POLY_SEG_THRESH     = cfg.POLY_SEG_THRESH
 TAG_THRESH          = cfg.TAG_SCORE_THRESH
+
+# Polygons larger than this fraction of the frame are flagged as
+# suspicious in the per-run diagnostic. Tune by reading the CSV
+# output (polygon_diagnostic.csv) after a run.
+POLYGON_HUGE_AREA_PCT = 30.0
 
 # ---- Visualization settings ----
 DRAW_BOXES          = True
@@ -116,17 +124,42 @@ def load_yolo(path):
     return model
 
 
-def load_heatmap_model(path, backbone):
+def load_heatmap_model(path, backbone, device):
     sys.path.insert(0, os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "keypoint_model"
     ))
     from train_keypoint import KeypointHeatmapModel
-    ckpt  = torch.load(path, map_location="cpu")
+    ckpt  = torch.load(path, map_location=device)
     model = KeypointHeatmapModel(backbone=backbone, pretrained=False)
     state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
     model.load_state_dict(state)
+    model.to(device)
     model.eval()
     return model
+
+
+def load_keypoint_seg(path, device):
+    """Load the HRNet keypoint-seg checkpoint and return
+    (model, classes, input_size). The checkpoint embeds its own
+    backbone / classes / input_size / disk_radius config so we
+    don't need cfg values to instantiate the model."""
+    from keypoint_seg_model.train_keypoint_seg import HRNetSegModel
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if "config" not in ckpt or "state_dict" not in ckpt:
+        raise RuntimeError(
+            f"Keypoint-seg checkpoint at {path} is missing 'config' or "
+            f"'state_dict' — was it saved by train_keypoint_seg.py?"
+        )
+    meta       = ckpt["config"]
+    backbone   = meta["backbone"]
+    classes    = list(meta["classes"])
+    input_size = int(meta["input_size"])
+    model = HRNetSegModel(
+        backbone=backbone, num_classes=len(classes), pretrained=False
+    ).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    return model, classes, input_size
 
 
 def load_polyline_seg(path, device):
@@ -225,6 +258,7 @@ def run_polygon(model, img_path, orig_h, orig_w, class_names):
         verbose = False,
     )
     detections = []
+    img_area   = float(orig_h * orig_w) or 1.0
     for r in results:
         if r.masks is None:
             continue
@@ -243,11 +277,19 @@ def run_polygon(model, img_path, orig_h, orig_w, class_names):
             cls_id  = int(boxes.cls[i].cpu())    if boxes else 0
             name    = class_names[cls_id] if cls_id < len(class_names) \
                       else f"class_{cls_id}"
+            # Diagnostic fields — read by main()'s polygon CSV writer.
+            # Underscore prefix marks these as internal/debug so downstream
+            # XML/COCO emitters don't need to filter them out.
+            poly_arr   = np.array(pts, dtype=np.float32)
+            poly_area  = float(cv2.contourArea(poly_arr))
+            area_pct   = 100.0 * poly_area / img_area
             detections.append({
                 "type"  : "polygon",
                 "points": pts,
                 "score" : score,
                 "label" : name,
+                "_diag_area_pct"  : area_pct,
+                "_diag_n_vertices": int(len(pts)),
             })
     return detections
 
@@ -284,6 +326,72 @@ def run_keypoints(model, img_path, orig_h, orig_w, device):
             "score": float(heatmap[y, x]),
             "label": "keypoint",
         })
+    return detections
+
+
+def run_keypoints_seg(model, classes, input_size, img_path,
+                      orig_h, orig_w, device):
+    """HRNet keypoint-seg inference.
+    Forward → sigmoid → upsample to original resolution → per class:
+    threshold → connected components → centroid + per-component max
+    probability as score → greedy distance-based NMS. Emits one
+    detection per surviving peak with its true class label."""
+    from test_polyline_seg import _preprocess
+
+    bgr = cv2.imread(img_path)
+    if bgr is None:
+        return []
+
+    tensor = _preprocess(bgr, input_size, device)
+    with torch.no_grad():
+        logits = model(tensor)
+        probs  = torch.sigmoid(logits).float()
+        probs  = F.interpolate(probs, size=(orig_h, orig_w),
+                               mode="bilinear", align_corners=False)
+    probs = probs.squeeze(0).cpu().numpy()   # (C, H, W)
+
+    # NMS distance is configured on the training-grid (input_size); scale
+    # it back to the original image so it's correct after upsampling.
+    nms_dist = KP_SEG_NMS_MIN_DIST * max(orig_h, orig_w) / float(input_size)
+
+    detections = []
+    for c, cname in enumerate(classes):
+        prob_map = probs[c]
+        mask     = (prob_map > KP_SEG_THRESH).astype(np.uint8)
+        if mask.sum() == 0:
+            continue
+        n_comp, labels, stats, _ = cv2.connectedComponentsWithStats(
+            mask, connectivity=8
+        )
+        # Candidate peaks: one per component, with per-component max prob.
+        cands = []
+        for comp_id in range(1, n_comp):
+            ys, xs = np.where(labels == comp_id)
+            if ys.size == 0:
+                continue
+            comp_probs = prob_map[ys, xs]
+            i_max = int(np.argmax(comp_probs))
+            cands.append((float(comp_probs[i_max]),
+                          float(xs[i_max]), float(ys[i_max])))
+        cands.sort(key=lambda t: t[0], reverse=True)
+        # Greedy NMS by minimum distance.
+        kept = []
+        for score, x, y in cands:
+            ok = True
+            for _, kx, ky in kept:
+                if (x - kx) ** 2 + (y - ky) ** 2 < nms_dist ** 2:
+                    ok = False
+                    break
+            if ok:
+                kept.append((score, x, y))
+        for score, x, y in kept:
+            detections.append({
+                "type" : "keypoint",
+                "x"    : x,
+                "y"    : y,
+                "score": score,
+                "label": cname,
+            })
     return detections
 
 
@@ -375,21 +483,16 @@ def draw_predictions(image, all_preds):
             if pred["type"] != "polygon":
                 continue
             color = get_color(pred["label"])
-            # Apply convex hull to fix self-intersections from segmentation
-            pts  = np.array(pred["points"], dtype=np.int32)
-            hull = cv2.convexHull(pts)
-            cv2.fillPoly(overlay, [hull], color)
+            pts   = np.array(pred["points"], dtype=np.int32)
+            cv2.fillPoly(overlay, [pts], color)
         output = cv2.addWeighted(overlay, MASK_ALPHA,
                                  output, 1 - MASK_ALPHA, 0)
-        # Contours — recompute hull per polygon (was previously buggy:
-        # reused the last-iteration hull from the fill loop).
         for pred in all_preds:
             if pred["type"] != "polygon":
                 continue
             color = get_color(pred["label"])
             pts   = np.array(pred["points"], dtype=np.int32)
-            hull  = cv2.convexHull(pts)
-            cv2.polylines(output, [hull], isClosed=True,
+            cv2.polylines(output, [pts], isClosed=True,
                           color=color, thickness=1)
 
     # --- Bounding boxes ---
@@ -717,11 +820,20 @@ def main():
     else:
         print(f"  ✗ Polygon model   : not found — skipped")
 
-    if model_exists(KEYPOINT_MODEL_PATH):
-        print(f"  ✓ Keypoint model  : {KEYPOINT_MODEL_PATH}")
-        models_loaded["keypoint"] = load_heatmap_model(
-            KEYPOINT_MODEL_PATH, cfg.KP_BACKBONE
-        )
+    kp_classes    = []
+    kp_input_size = cfg.KP_SEG_INPUT_SIZE
+    if model_exists(KEYPOINT_SEG_PATH):
+        print(f"  ✓ Keypoint model  : {KEYPOINT_SEG_PATH} (seg)")
+        (models_loaded["keypoint_seg"],
+         kp_classes,
+         kp_input_size) = load_keypoint_seg(KEYPOINT_SEG_PATH, device)
+    # LEGACY KEYPOINT — kept for revert; see keypoint_seg_model/train_keypoint_seg.py.
+    # Uncomment the elif block below to fall back to the heatmap model.
+    # elif model_exists(KEYPOINT_MODEL_PATH):
+    #     print(f"  ✓ Keypoint model  : {KEYPOINT_MODEL_PATH} (legacy)")
+    #     models_loaded["keypoint"] = load_heatmap_model(
+    #         KEYPOINT_MODEL_PATH, cfg.KP_BACKBONE, device
+    #     )
     else:
         print(f"  ✗ Keypoint model  : not found — skipped")
 
@@ -739,7 +851,7 @@ def main():
 
     tag_names = []
     if model_exists(TAG_MODEL_PATH) and model_exists(TAG_NAMES_PATH):
-        with open(TAG_NAMES_PATH) as f:
+        with open(TAG_NAMES_PATH, encoding="utf-8") as f:
             tag_names = json.load(f)
         print(f"  ✓ Tag model       : {TAG_MODEL_PATH} "
               f"({len(tag_names)} tags)")
@@ -763,7 +875,12 @@ def main():
             for n in names:
                 if n not in all_class_names:
                     all_class_names.append(n)
-    # Keypoint is currently class-agnostic (labelled "keypoint")
+    # Keypoint-seg is per-class — give each label its own color.
+    # The hardcoded "keypoint" entry below is only used by the legacy
+    # heatmap path, which is class-agnostic; kept for revert.
+    for name in kp_classes:
+        if name not in all_class_names:
+            all_class_names.append(name)
     if "keypoint" not in all_class_names:
         all_class_names.append("keypoint")
     # Polyline-seg is per-class — give each label its own color
@@ -780,10 +897,11 @@ def main():
     # Inference loop
     # --------------------------------------------------------
     print(f"\n--- Running inference ---")
-    all_image_preds = {}   # filename → list of preds
-    images_meta     = {}   # filename → {width, height}
-    per_img_stats   = []
-    infer_start     = time.time()
+    all_image_preds  = {}   # filename → list of preds
+    images_meta      = {}   # filename → {width, height}
+    per_img_stats    = []
+    polygon_diag_rows = []   # one row per polygon detection
+    infer_start      = time.time()
 
     for img_path in image_paths:
         fname    = os.path.basename(img_path)
@@ -819,13 +937,20 @@ def main():
             )
             all_preds.extend(preds)
 
-        # Keypoints
-        if "keypoint" in models_loaded:
-            preds = run_keypoints(
-                models_loaded["keypoint"], img_path,
-                orig_h, orig_w, device
+        # Keypoints (seg)
+        if "keypoint_seg" in models_loaded:
+            preds = run_keypoints_seg(
+                models_loaded["keypoint_seg"], kp_classes, kp_input_size,
+                img_path, orig_h, orig_w, device
             )
             all_preds.extend(preds)
+        # LEGACY KEYPOINT — kept for revert.
+        # if "keypoint" in models_loaded:
+        #     preds = run_keypoints(
+        #         models_loaded["keypoint"], img_path,
+        #         orig_h, orig_w, device
+        #     )
+        #     all_preds.extend(preds)
 
         # Polylines (HRNet seg)
         if "polyline_seg" in models_loaded:
@@ -857,6 +982,30 @@ def main():
         type_counts = defaultdict(int)
         for p in all_preds:
             type_counts[p["type"]] += 1
+
+        # Polygon diagnostic: capture per-polygon stats and flag
+        # frames whose largest polygon exceeds POLYGON_HUGE_AREA_PCT.
+        huge_in_this_img = []
+        for p in all_preds:
+            if p["type"] != "polygon":
+                continue
+            area_pct = p.get("_diag_area_pct", 0.0)
+            nv       = p.get("_diag_n_vertices", 0)
+            polygon_diag_rows.append({
+                "image"     : fname,
+                "label"     : p["label"],
+                "score"     : f"{p['score']:.4f}",
+                "n_vertices": nv,
+                "area_pct"  : f"{area_pct:.2f}",
+                "suspicious": "1" if area_pct >= POLYGON_HUGE_AREA_PCT else "0",
+            })
+            if area_pct >= POLYGON_HUGE_AREA_PCT:
+                huge_in_this_img.append((p["label"], area_pct))
+        if huge_in_this_img:
+            tag = ", ".join(f"{lab}({pct:.1f}%)"
+                            for lab, pct in huge_in_this_img)
+            print(f"    ! huge polygon(s) in {fname}: {tag}")
+
         per_img_stats.append({
             "image"     : fname,
             "total"     : len(all_preds),
@@ -890,14 +1039,14 @@ def main():
         all_image_preds, images_meta, all_class_names
     )
     coco_path = os.path.join(OUTPUT_DIR, "predictions_coco.json")
-    with open(coco_path, "w") as f:
-        json.dump(coco, f, indent=2)
+    with open(coco_path, "w", encoding="utf-8") as f:
+        json.dump(coco, f, indent=2, ensure_ascii=False)
 
     # --------------------------------------------------------
     # Save per-image stats CSV
     # --------------------------------------------------------
     stats_path = os.path.join(OUTPUT_DIR, "per_image_stats.csv")
-    with open(stats_path, "w", newline="") as f:
+    with open(stats_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "image", "total", "bbox", "polygon",
             "keypoint", "polyline", "tag"
@@ -906,13 +1055,40 @@ def main():
         writer.writerows(per_img_stats)
 
     # --------------------------------------------------------
+    # Save polygon diagnostic CSV (Phase A)
+    # --------------------------------------------------------
+    diag_path = os.path.join(OUTPUT_DIR, "polygon_diagnostic.csv")
+    with open(diag_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "image", "label", "score", "n_vertices",
+            "area_pct", "suspicious",
+        ])
+        writer.writeheader()
+        writer.writerows(polygon_diag_rows)
+
+    # Build per-class polygon summary (count, mean/max area %, # suspicious)
+    polygon_class_summary = defaultdict(lambda: {
+        "count": 0, "area_sum": 0.0, "area_max": 0.0,
+        "n_susp": 0, "n_vertices_sum": 0,
+    })
+    for row in polygon_diag_rows:
+        a   = float(row["area_pct"])
+        nv  = int(row["n_vertices"])
+        agg = polygon_class_summary[row["label"]]
+        agg["count"]          += 1
+        agg["area_sum"]       += a
+        agg["area_max"]        = max(agg["area_max"], a)
+        agg["n_susp"]         += 1 if row["suspicious"] == "1" else 0
+        agg["n_vertices_sum"] += nv
+
+    # --------------------------------------------------------
     # Save summary report
     # --------------------------------------------------------
     total_time    = time.time() - infer_start
     total_dets    = sum(s["total"] for s in per_img_stats)
     summary_path  = os.path.join(OUTPUT_DIR, "summary_report.txt")
 
-    with open(summary_path, "w") as f:
+    with open(summary_path, "w", encoding="utf-8") as f:
         def w(line=""):
             f.write(line + "\n")
         w("═" * 55)
@@ -924,7 +1100,7 @@ def main():
         w(f"  Device       : {device}")
         w()
         w("  Models used:")
-        for key in ["bbox", "polygon", "keypoint", "polyline_seg", "tag"]:
+        for key in ["bbox", "polygon", "keypoint_seg", "polyline_seg", "tag"]:
             status = "✓" if key in models_loaded else "✗"
             w(f"    {status}  {key}")
         w()
@@ -939,6 +1115,20 @@ def main():
             n = sum(s[t] for s in per_img_stats)
             w(f"    {t:<12}: {n}")
         w()
+        # Polygon class diagnostic (Phase A) — see polygon_diagnostic.csv
+        # for the full per-detection breakdown.
+        if polygon_class_summary:
+            w("  Polygon diagnostic (per class):")
+            w(f"    {'class':<20} {'count':>6} {'mean_area%':>11} "
+              f"{'max_area%':>10} {'mean_verts':>11} "
+              f"{'n>'+str(int(POLYGON_HUGE_AREA_PCT))+'%':>9}")
+            for lab, agg in sorted(polygon_class_summary.items()):
+                mean_a = agg["area_sum"] / agg["count"]
+                mean_v = agg["n_vertices_sum"] / agg["count"]
+                w(f"    {lab:<20} {agg['count']:>6} {mean_a:>11.2f} "
+                  f"{agg['area_max']:>10.2f} {mean_v:>11.1f} "
+                  f"{agg['n_susp']:>9}")
+            w()
         w(f"  Total time       : "
           f"{str(datetime.timedelta(seconds=int(total_time)))}")
         w(f"  Avg per image    : "
@@ -949,6 +1139,7 @@ def main():
         w(f"    CVAT XML         : {xml_path}")
         w(f"    COCO JSON        : {coco_path}")
         w(f"    Per-image stats  : {stats_path}")
+        w(f"    Polygon diag     : {diag_path}")
         w(f"    This report      : {summary_path}")
         w("═" * 55)
 

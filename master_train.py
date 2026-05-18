@@ -409,16 +409,39 @@ def main():
 
     # --- Keypoint ---
     if KEYPOINT_TYPE in present_types:
-        log("\n" + "═" * 55)
-        log("  [3/5] KEYPOINT MODEL")
-        log("═" * 55)
-        try:
-            from keypoint_model.train_keypoint import train as train_kp
-            best = train_kp(images=images, log_fn=log)
-            results[KEYPOINT_TYPE] = best
-        except Exception as e:
-            log(f"  FAILED: {e}")
-            failures[KEYPOINT_TYPE] = str(e)
+        if getattr(cfg, "KP_USE_SEG", True):
+            # New path: HRNet per-class disk segmentation
+            log("\n" + "═" * 55)
+            log("  [3/5] KEYPOINT MODEL — Segmentation (HRNet)")
+            log("═" * 55)
+            try:
+                from data_prep.split_annotations import get_labels_for_type
+                classes = get_labels_for_type(images, KEYPOINT_TYPE)
+                log(f"  Keypoint classes (auto-derived): {classes}")
+                from keypoint_seg_model.train_keypoint_seg import (
+                    train as train_kp_seg
+                )
+                best = train_kp_seg(images=images, log_fn=log, classes=classes)
+                results[KEYPOINT_TYPE] = best
+            except Exception as e:
+                log(f"  FAILED: {e}")
+                failures[KEYPOINT_TYPE] = str(e)
+        else:
+            # LEGACY KEYPOINT — kept for revert; see train_keypoint_seg.py.
+            # Uncomment the block below and set cfg.KP_USE_SEG=False to use it.
+            # ----------------------------------------------------------
+            # log("\n" + "═" * 55)
+            # log("  [3/5] KEYPOINT MODEL (legacy heatmap)")
+            # log("═" * 55)
+            # try:
+            #     from keypoint_model.train_keypoint import train as train_kp
+            #     best = train_kp(images=images, log_fn=log)
+            #     results[KEYPOINT_TYPE] = best
+            # except Exception as e:
+            #     log(f"  FAILED: {e}")
+            #     failures[KEYPOINT_TYPE] = str(e)
+            log("\n  [3/5] KEYPOINT — legacy path is commented out; "
+                "set KP_USE_SEG=True or restore the legacy block above.")
     else:
         log("\n  [3/5] KEYPOINT — skipped")
 

@@ -169,9 +169,9 @@ MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
 
 DEVICE          = "cuda"        # "cuda" or "cpu"
 INPUT_SIZE      = 640           # input image size for all models
-VAL_RATIO       = 0.4          # fraction of data used for validation
+VAL_RATIO       = 0.2          # fraction of data used for validation
 RANDOM_SEED     = 42
-NUM_WORKERS     = 4
+NUM_WORKERS     = 6
 
 # ImageNet normalization — shared across all models
 PIXEL_MEAN      = [0.485, 0.456, 0.406]
@@ -183,10 +183,10 @@ PIXEL_STD       = [0.229, 0.224, 0.225]
 
 YOLO_BBOX_MODEL_SIZE     = "yolov8n.pt"
 YOLO_POLYGON_MODEL_SIZE     = "yolov8n-seg.pt"
-YOLO_EPOCHS         = 100
-YOLO_BATCH_SIZE     = 8
+YOLO_EPOCHS         = 200
+YOLO_BATCH_SIZE     = 16
 YOLO_LR             = 0.01
-YOLO_PATIENCE       = 100
+YOLO_PATIENCE       = 20
 YOLO_SCORE_THRESH   = 0.25
 YOLO_NMS_THRESH     = 0.45
 YOLO_AUGMENT        = True
@@ -233,8 +233,8 @@ POLY_S2_CHECKPOINT_EVERY= 10
 
 TAG_BACKBONE        = "efficientnet_b0"
 TAG_PRETRAINED      = True
-TAG_EPOCHS          = 5
-TAG_BATCH_SIZE      = 32
+TAG_EPOCHS          = 40
+TAG_BATCH_SIZE      = 64
 TAG_LR              = 1e-4
 TAG_WEIGHT_DECAY    = 1e-4
 TAG_SCORE_THRESH    = 0.5
@@ -266,3 +266,29 @@ POLY_SEG_DICE_WEIGHT      = 1.0
 POLY_SEG_THRESH           = 0.5
 POLY_SEG_CHECKPOINT_EVERY = 20
 POLY_SEG_CLASSES          = []   # auto-populated at runtime by master_train.py
+
+# ============================================================
+# --- KEYPOINT-SEG (new, HRNet per-class segmentation) ---
+# When KP_USE_SEG is True (default), master_train.py routes the
+# keypoint step to keypoint_seg_model/train_keypoint_seg.py
+# (HRNet-W18 per-class small-disk segmentation + BCE+Dice).
+# Set False to fall back to the legacy single-channel Gaussian
+# heatmap trainer at keypoint_model/train_keypoint.py.
+# ============================================================
+
+KP_USE_SEG               = True
+KP_SEG_BACKBONE          = "hrnet_w18"
+KP_SEG_PRETRAINED        = True
+KP_SEG_INPUT_SIZE        = 640
+KP_SEG_EPOCHS            = 100
+KP_SEG_BATCH_SIZE        = 4
+KP_SEG_LR                = 1e-4
+KP_SEG_WEIGHT_DECAY      = 1e-4
+KP_SEG_WARMUP_ITERS      = 500
+KP_SEG_DISK_RADIUS       = 6      # px on input_size grid; ~6/640 ≈ 0.9% of image
+KP_SEG_BCE_WEIGHT        = 1.0
+KP_SEG_DICE_WEIGHT       = 1.0
+KP_SEG_THRESH            = 0.5
+KP_SEG_CHECKPOINT_EVERY  = 20
+KP_SEG_CLASSES           = []     # auto-populated at runtime by master_train.py
+KP_SEG_NMS_MIN_DIST      = 8      # px on input_size grid; min separation between peaks
