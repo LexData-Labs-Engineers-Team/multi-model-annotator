@@ -168,7 +168,7 @@ MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
 # ============================================================
 
 DEVICE          = "cuda"        # "cuda" or "cpu"
-INPUT_SIZE      = 640           # input image size for all models
+INPUT_SIZE      = 1024           # input image size for all models
 VAL_RATIO       = 0.2          # fraction of data used for validation
 RANDOM_SEED     = 42
 NUM_WORKERS     = 6
@@ -181,10 +181,10 @@ PIXEL_STD       = [0.229, 0.224, 0.225]
 # --- YOLO (BBOX + POLYGON MODELS) ---
 # ============================================================
 
-YOLO_BBOX_MODEL_SIZE     = "yolov8n.pt"
-YOLO_POLYGON_MODEL_SIZE     = "yolov8n-seg.pt"
-YOLO_EPOCHS         = 200
-YOLO_BATCH_SIZE     = 16
+YOLO_BBOX_MODEL_SIZE     = "yolov8s.pt"
+YOLO_POLYGON_MODEL_SIZE     = "yolov8s-seg.pt"
+YOLO_EPOCHS         = 300
+YOLO_BATCH_SIZE     = 4
 YOLO_LR             = 0.01
 YOLO_PATIENCE       = 20
 YOLO_SCORE_THRESH   = 0.25
@@ -242,6 +242,18 @@ TAG_CHECKPOINT_EVERY= 10
 
 
 EDGE_THRESH = 0.5
+
+# ============================================================
+# --- SHAPE REFINER (data-driven polygon postprocessing) ---
+# Enable to apply shape_refiner.py at master_test.py inference:
+#   Pass 1: simplifies each polygon to its class's median vertex
+#           count (derived from class_priors.json).
+#   Pass 2: enforces mutual exclusion for always_zero class pairs.
+# Disable to compare against raw model output.
+# ============================================================
+
+SHAPE_REFINER_ENABLED = True
+CLASS_PRIORS_PATH     = os.path.join(SAVE_DIR, "class_priors.json")
 
 # ============================================================
 # --- POLYLINE-SEG (new, working) ---

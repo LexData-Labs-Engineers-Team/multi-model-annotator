@@ -903,6 +903,20 @@ def main():
     polygon_diag_rows = []   # one row per polygon detection
     infer_start      = time.time()
 
+    # --------------------------------------------------------
+    # Shape refiner (postprocessing) — loaded once.
+    # --------------------------------------------------------
+    shape_priors = None
+    if getattr(cfg, "SHAPE_REFINER_ENABLED", False):
+        from shape_refiner import load_priors, refine_predictions
+        shape_priors = load_priors(cfg.CLASS_PRIORS_PATH)
+        if shape_priors is None:
+            print(f"  ! SHAPE_REFINER_ENABLED but priors not found at "
+                  f"{cfg.CLASS_PRIORS_PATH} — refinement skipped.")
+        else:
+            print(f"  Shape refiner    : on (priors from "
+                  f"{cfg.CLASS_PRIORS_PATH})")
+
     for img_path in image_paths:
         fname    = os.path.basename(img_path)
         orig_img = cv2.imread(img_path)
@@ -969,6 +983,15 @@ def main():
                 tag_names, device
             )
             all_preds.extend(preds)
+
+        # Shape refiner — image-aware vegetation clip + simplify +
+        # mutually-exclude polygons before we draw, export, or measure
+        # diagnostics. Passing orig_img enables Pass 0 (vegetation clip
+        # for tree_canopy etc.).
+        if shape_priors is not None:
+            all_preds = refine_predictions(
+                all_preds, shape_priors, orig_h, orig_w, image=orig_img
+            )
 
         all_image_preds[fname] = all_preds
 
