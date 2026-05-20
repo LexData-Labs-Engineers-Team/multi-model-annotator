@@ -105,7 +105,7 @@ def train(images, log_fn=print):
         log_fn : logging function from master_train.py
     """
     log_fn("\n" + "─" * 50)
-    log_fn("  POLYGON MODEL — YOLOv8n-seg")
+    log_fn(f"  POLYGON MODEL — {cfg.YOLO_POLYGON_MODEL_SIZE}")
     log_fn("─" * 50)
 
     try:
@@ -157,7 +157,10 @@ def train(images, log_fn=print):
         conf        = cfg.YOLO_SCORE_THRESH,
         iou         = cfg.YOLO_NMS_THRESH,
         overlap_mask= True,
-        mask_ratio  = 4,
+        mask_ratio  = 2,
+        optimizer   = cfg.YOLO_OPTIMIZER,
+        mosaic      = cfg.YOLO_MOSAIC,
+        retina_masks= cfg.YOLO_RETINA_MASKS,
     )
 
     elapsed    = str(datetime.timedelta(seconds=int(time.time() - start)))

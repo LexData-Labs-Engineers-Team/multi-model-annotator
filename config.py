@@ -164,11 +164,21 @@ TAG_SAVE_DIR        = os.path.join(SAVE_DIR, "tag_model")
 MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
 
 # ============================================================
+# --- MODEL ENABLE/DISABLE (True = train, False = skip) ---
+# ============================================================
+
+TRAIN_BBOX      = True
+TRAIN_POLYGON   = True
+TRAIN_KEYPOINT  = False
+TRAIN_POLYLINE  = False
+TRAIN_TAG       = False
+
+# ============================================================
 # --- GENERAL TRAINING ---
 # ============================================================
 
 DEVICE          = "cuda"        # "cuda" or "cpu"
-INPUT_SIZE      = 1024           # input image size for all models
+INPUT_SIZE      = 720           # input image size for all models
 VAL_RATIO       = 0.2          # fraction of data used for validation
 RANDOM_SEED     = 42
 NUM_WORKERS     = 6
@@ -181,15 +191,18 @@ PIXEL_STD       = [0.229, 0.224, 0.225]
 # --- YOLO (BBOX + POLYGON MODELS) ---
 # ============================================================
 
-YOLO_BBOX_MODEL_SIZE     = "yolov8s.pt"
-YOLO_POLYGON_MODEL_SIZE     = "yolov8s-seg.pt"
-YOLO_EPOCHS         = 300
-YOLO_BATCH_SIZE     = 4
+YOLO_BBOX_MODEL_SIZE     = "yolo11s.pt"
+YOLO_POLYGON_MODEL_SIZE     = "yolo11s-seg.pt"
+YOLO_EPOCHS         = 500
+YOLO_BATCH_SIZE     = 12
 YOLO_LR             = 0.01
 YOLO_PATIENCE       = 20
 YOLO_SCORE_THRESH   = 0.25
 YOLO_NMS_THRESH     = 0.45
 YOLO_AUGMENT        = True
+YOLO_OPTIMIZER      = 'AdamW'
+YOLO_MOSAIC         = 1
+YOLO_RETINA_MASKS   = True
 
 # ============================================================
 # --- KEYPOINT MODEL ---

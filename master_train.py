@@ -363,8 +363,19 @@ def main():
         log("\n  ERROR: No annotations found in XML.")
         return
 
-    log(f"\n  Will train  : {sorted(present_types)}")
-    log(f"  Will skip   : {sorted(set(all_types) - present_types)}")
+    train_flags = {
+        BBOX_TYPE: cfg.TRAIN_BBOX, POLYGON_TYPE: cfg.TRAIN_POLYGON,
+        KEYPOINT_TYPE: cfg.TRAIN_KEYPOINT, POLYLINE_TYPE: cfg.TRAIN_POLYLINE,
+        TAG_TYPE: cfg.TRAIN_TAG,
+    }
+    disabled = sorted(t for t, on in train_flags.items() if not on)
+    will_train = sorted(t for t in present_types if train_flags.get(t, True))
+    will_skip  = sorted(set(all_types) - present_types | set(disabled))
+
+    if disabled:
+        log(f"\n  Disabled    : {disabled}")
+    log(f"  Will train  : {will_train}")
+    log(f"  Will skip   : {will_skip}")
 
     os.makedirs(cfg.DATA_DIR, exist_ok=True)
 
@@ -378,7 +389,11 @@ def main():
     failures = {}
 
     # --- Bbox ---
-    if BBOX_TYPE in present_types:
+    if not cfg.TRAIN_BBOX:
+        log("\n  [1/5] BBOX — disabled in config")
+    elif BBOX_TYPE not in present_types:
+        log("\n  [1/5] BBOX — skipped (no annotations)")
+    else:
         log("\n" + "═" * 55)
         log("  [1/5] BBOX MODEL")
         log("═" * 55)
@@ -389,11 +404,13 @@ def main():
         except Exception as e:
             log(f"  FAILED: {e}")
             failures[BBOX_TYPE] = str(e)
-    else:
-        log("\n  [1/5] BBOX — skipped")
 
     # --- Polygon ---
-    if POLYGON_TYPE in present_types:
+    if not cfg.TRAIN_POLYGON:
+        log("\n  [2/5] POLYGON — disabled in config")
+    elif POLYGON_TYPE not in present_types:
+        log("\n  [2/5] POLYGON — skipped (no annotations)")
+    else:
         log("\n" + "═" * 55)
         log("  [2/5] POLYGON MODEL")
         log("═" * 55)
@@ -404,99 +421,101 @@ def main():
         except Exception as e:
             log(f"  FAILED: {e}")
             failures[POLYGON_TYPE] = str(e)
-    else:
-        log("\n  [2/5] POLYGON — skipped")
 
     # --- Keypoint ---
-    if KEYPOINT_TYPE in present_types:
-        if getattr(cfg, "KP_USE_SEG", True):
-            # New path: HRNet per-class disk segmentation
-            log("\n" + "═" * 55)
-            log("  [3/5] KEYPOINT MODEL — Segmentation (HRNet)")
-            log("═" * 55)
-            try:
-                from data_prep.split_annotations import get_labels_for_type
-                classes = get_labels_for_type(images, KEYPOINT_TYPE)
-                log(f"  Keypoint classes (auto-derived): {classes}")
-                from keypoint_seg_model.train_keypoint_seg import (
-                    train as train_kp_seg
-                )
-                best = train_kp_seg(images=images, log_fn=log, classes=classes)
-                results[KEYPOINT_TYPE] = best
-            except Exception as e:
-                log(f"  FAILED: {e}")
-                failures[KEYPOINT_TYPE] = str(e)
-        else:
-            # LEGACY KEYPOINT — kept for revert; see train_keypoint_seg.py.
-            # Uncomment the block below and set cfg.KP_USE_SEG=False to use it.
-            # ----------------------------------------------------------
-            # log("\n" + "═" * 55)
-            # log("  [3/5] KEYPOINT MODEL (legacy heatmap)")
-            # log("═" * 55)
-            # try:
-            #     from keypoint_model.train_keypoint import train as train_kp
-            #     best = train_kp(images=images, log_fn=log)
-            #     results[KEYPOINT_TYPE] = best
-            # except Exception as e:
-            #     log(f"  FAILED: {e}")
-            #     failures[KEYPOINT_TYPE] = str(e)
-            log("\n  [3/5] KEYPOINT — legacy path is commented out; "
-                "set KP_USE_SEG=True or restore the legacy block above.")
+    if not cfg.TRAIN_KEYPOINT:
+        log("\n  [3/5] KEYPOINT — disabled in config")
+    elif KEYPOINT_TYPE not in present_types:
+        log("\n  [3/5] KEYPOINT — skipped (no annotations)")
+    elif getattr(cfg, "KP_USE_SEG", True):
+        log("\n" + "═" * 55)
+        log("  [3/5] KEYPOINT MODEL — Segmentation (HRNet)")
+        log("═" * 55)
+        try:
+            from data_prep.split_annotations import get_labels_for_type
+            classes = get_labels_for_type(images, KEYPOINT_TYPE)
+            log(f"  Keypoint classes (auto-derived): {classes}")
+            from keypoint_seg_model.train_keypoint_seg import (
+                train as train_kp_seg
+            )
+            best = train_kp_seg(images=images, log_fn=log, classes=classes)
+            results[KEYPOINT_TYPE] = best
+        except Exception as e:
+            log(f"  FAILED: {e}")
+            failures[KEYPOINT_TYPE] = str(e)
     else:
-        log("\n  [3/5] KEYPOINT — skipped")
+        # LEGACY KEYPOINT — kept for revert; see train_keypoint_seg.py.
+        # Uncomment the block below and set cfg.KP_USE_SEG=False to use it.
+        # ----------------------------------------------------------
+        # log("\n" + "═" * 55)
+        # log("  [3/5] KEYPOINT MODEL (legacy heatmap)")
+        # log("═" * 55)
+        # try:
+        #     from keypoint_model.train_keypoint import train as train_kp
+        #     best = train_kp(images=images, log_fn=log)
+        #     results[KEYPOINT_TYPE] = best
+        # except Exception as e:
+        #     log(f"  FAILED: {e}")
+        #     failures[KEYPOINT_TYPE] = str(e)
+        log("\n  [3/5] KEYPOINT — legacy path is commented out; "
+            "set KP_USE_SEG=True or restore the legacy block above.")
 
     # --- Polyline ---
-    if POLYLINE_TYPE in present_types:
-        if getattr(cfg, "POLY_USE_SEG", True):
-            # New path: HRNet per-class segmentation
-            log("\n" + "═" * 55)
-            log("  [4/5] POLYLINE MODEL — Segmentation (HRNet)")
-            log("═" * 55)
-            try:
-                from data_prep.split_annotations import get_labels_for_type
-                classes = get_labels_for_type(images, POLYLINE_TYPE)
-                log(f"  Polyline classes (auto-derived): {classes}")
-                from polyline_model_working.train_polyline_seg import (
-                    train as train_seg
-                )
-                best = train_seg(images=images, log_fn=log, classes=classes)
-                results[POLYLINE_TYPE] = best
-            except Exception as e:
-                log(f"  FAILED: {e}")
-                failures[POLYLINE_TYPE] = str(e)
-        else:
-            # Legacy 2-stage path (kept for A/B comparison)
-            log("\n" + "═" * 55)
-            log("  [4/5] POLYLINE MODEL — Stage 1 (legacy)")
-            log("═" * 55)
-            s1_ok = False
-            try:
-                from polyline_model.train_polyline_s1 import train as train_s1
-                best_s1 = train_s1(images=images, log_fn=log)
-                results[f"{POLYLINE_TYPE}_s1"] = best_s1
-                s1_ok = True
-            except Exception as e:
-                log(f"  FAILED (Stage 1): {e}")
-                failures[f"{POLYLINE_TYPE}_s1"] = str(e)
-
-            if s1_ok:
-                log("\n" + "─" * 55)
-                log("  [4/5] POLYLINE MODEL — Stage 2 (legacy)")
-                log("─" * 55)
-                try:
-                    from polyline_model.train_polyline_s2 import train as train_s2
-                    best_s2 = train_s2(images=images, log_fn=log)
-                    results[f"{POLYLINE_TYPE}_s2"] = best_s2
-                except Exception as e:
-                    log(f"  FAILED (Stage 2): {e}")
-                    failures[f"{POLYLINE_TYPE}_s2"] = str(e)
-            else:
-                log("  Stage 2 skipped — Stage 1 failed.")
+    if not cfg.TRAIN_POLYLINE:
+        log("\n  [4/5] POLYLINE — disabled in config")
+    elif POLYLINE_TYPE not in present_types:
+        log("\n  [4/5] POLYLINE — skipped (no annotations)")
+    elif getattr(cfg, "POLY_USE_SEG", True):
+        log("\n" + "═" * 55)
+        log("  [4/5] POLYLINE MODEL — Segmentation (HRNet)")
+        log("═" * 55)
+        try:
+            from data_prep.split_annotations import get_labels_for_type
+            classes = get_labels_for_type(images, POLYLINE_TYPE)
+            log(f"  Polyline classes (auto-derived): {classes}")
+            from polyline_model_working.train_polyline_seg import (
+                train as train_seg
+            )
+            best = train_seg(images=images, log_fn=log, classes=classes)
+            results[POLYLINE_TYPE] = best
+        except Exception as e:
+            log(f"  FAILED: {e}")
+            failures[POLYLINE_TYPE] = str(e)
     else:
-        log("\n  [4/5] POLYLINE — skipped")
+        # Legacy 2-stage path (kept for A/B comparison)
+        log("\n" + "═" * 55)
+        log("  [4/5] POLYLINE MODEL — Stage 1 (legacy)")
+        log("═" * 55)
+        s1_ok = False
+        try:
+            from polyline_model.train_polyline_s1 import train as train_s1
+            best_s1 = train_s1(images=images, log_fn=log)
+            results[f"{POLYLINE_TYPE}_s1"] = best_s1
+            s1_ok = True
+        except Exception as e:
+            log(f"  FAILED (Stage 1): {e}")
+            failures[f"{POLYLINE_TYPE}_s1"] = str(e)
+
+        if s1_ok:
+            log("\n" + "─" * 55)
+            log("  [4/5] POLYLINE MODEL — Stage 2 (legacy)")
+            log("─" * 55)
+            try:
+                from polyline_model.train_polyline_s2 import train as train_s2
+                best_s2 = train_s2(images=images, log_fn=log)
+                results[f"{POLYLINE_TYPE}_s2"] = best_s2
+            except Exception as e:
+                log(f"  FAILED (Stage 2): {e}")
+                failures[f"{POLYLINE_TYPE}_s2"] = str(e)
+        else:
+            log("  Stage 2 skipped — Stage 1 failed.")
 
     # --- Tag ---
-    if TAG_TYPE in present_types:
+    if not cfg.TRAIN_TAG:
+        log("\n  [5/5] TAG — disabled in config")
+    elif TAG_TYPE not in present_types:
+        log("\n  [5/5] TAG — skipped (no annotations)")
+    else:
         log("\n" + "═" * 55)
         log("  [5/5] TAG MODEL")
         log("═" * 55)
@@ -507,8 +526,6 @@ def main():
         except Exception as e:
             log(f"  FAILED: {e}")
             failures[TAG_TYPE] = str(e)
-    else:
-        log("\n  [5/5] TAG — skipped")
 
     # --------------------------------------------------------
     # Step 5 — Summary

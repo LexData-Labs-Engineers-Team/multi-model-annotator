@@ -250,12 +250,13 @@ def run_bbox(model, img_path, orig_h, orig_w, class_names):
 
 def run_polygon(model, img_path, orig_h, orig_w, class_names):
     results = model.predict(
-        source  = img_path,
-        imgsz   = cfg.INPUT_SIZE,
-        conf    = POLY_SCORE_THRESH,
-        iou     = cfg.YOLO_NMS_THRESH,
-        device  = cfg.DEVICE,
-        verbose = False,
+        source       = img_path,
+        imgsz        = cfg.INPUT_SIZE,
+        conf         = POLY_SCORE_THRESH,
+        iou          = cfg.YOLO_NMS_THRESH,
+        device       = cfg.DEVICE,
+        retina_masks = cfg.YOLO_RETINA_MASKS,
+        verbose      = False,
     )
     detections = []
     img_area   = float(orig_h * orig_w) or 1.0
