@@ -48,6 +48,8 @@ BBOX_MODEL_PATH     = os.path.join(cfg.BBOX_SAVE_DIR,
                                    "train", "weights", "best.pt")
 POLYGON_MODEL_PATH  = os.path.join(cfg.POLYGON_SAVE_DIR,
                                    "train", "weights", "best.pt")
+POLYGON_SEG_PATH    = os.path.join(cfg.POLYGON_SAVE_DIR,
+                                   "best_polygon_seg.pt")
 KEYPOINT_MODEL_PATH = os.path.join(cfg.KEYPOINT_SAVE_DIR, "best.pt")
 KEYPOINT_SEG_PATH   = os.path.join(cfg.KEYPOINT_SAVE_DIR, "best_seg.pt")
 POLYLINE_SEG_PATH   = os.path.join(cfg.POLYLINE_SAVE_DIR, "best_seg.pt")
@@ -149,6 +151,30 @@ def load_keypoint_seg(path, device):
         raise RuntimeError(
             f"Keypoint-seg checkpoint at {path} is missing 'config' or "
             f"'state_dict' — was it saved by train_keypoint_seg.py?"
+        )
+    meta       = ckpt["config"]
+    backbone   = meta["backbone"]
+    classes    = list(meta["classes"])
+    input_size = int(meta["input_size"])
+    model = HRNetSegModel(
+        backbone=backbone, num_classes=len(classes), pretrained=False
+    ).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    return model, classes, input_size
+
+
+def load_polygon_seg(path, device):
+    """Load the HRNet polygon-seg checkpoint and return
+    (model, classes, input_size). The checkpoint embeds its own
+    backbone / classes / input_size config so we don't need cfg
+    values to instantiate the model."""
+    from polygon_seg_model.train_polygon_seg import HRNetSegModel
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if "config" not in ckpt or "state_dict" not in ckpt:
+        raise RuntimeError(
+            f"Polygon-seg checkpoint at {path} is missing 'config' or "
+            f"'state_dict' — was it saved by train_polygon_seg.py?"
         )
     meta       = ckpt["config"]
     backbone   = meta["backbone"]
@@ -291,6 +317,66 @@ def run_polygon(model, img_path, orig_h, orig_w, class_names):
                 "label" : name,
                 "_diag_area_pct"  : area_pct,
                 "_diag_n_vertices": int(len(pts)),
+            })
+    return detections
+
+
+def run_polygon_seg(model, classes, input_size, img_path,
+                    orig_h, orig_w, device):
+    """HRNet polygon-seg inference.
+    Forward → sigmoid → upsample to original resolution → per class:
+    threshold → findContours → filter by min area → Douglas-Peucker
+    simplify → emit polygon detections."""
+    from test_polyline_seg import _preprocess
+
+    bgr = cv2.imread(img_path)
+    if bgr is None:
+        return []
+
+    tensor = _preprocess(bgr, input_size, device)
+    with torch.no_grad():
+        logits = model(tensor)
+        probs  = torch.sigmoid(logits).float()
+        probs  = F.interpolate(probs, size=(orig_h, orig_w),
+                               mode="bilinear", align_corners=False)
+    probs = probs.squeeze(0).cpu().numpy()   # (C, H, W)
+
+    min_area     = getattr(cfg, "POLYGON_SEG_MIN_AREA", 100)
+    eps_ratio    = getattr(cfg, "POLYGON_SEG_EPSILON_RATIO", 0.002)
+    seg_thresh   = getattr(cfg, "POLYGON_SEG_THRESH", 0.5)
+    img_area     = float(orig_h * orig_w) or 1.0
+
+    detections = []
+    for c, cname in enumerate(classes):
+        prob_map = probs[c]
+        mask     = (prob_map > seg_thresh).astype(np.uint8) * 255
+        if mask.sum() == 0:
+            continue
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area:
+                continue
+            epsilon = eps_ratio * cv2.arcLength(cnt, closed=True)
+            approx  = cv2.approxPolyDP(cnt, epsilon, closed=True)
+            pts = approx.reshape(-1, 2)
+            if len(pts) < 3:
+                continue
+            xs = np.clip(pts[:, 0], 0, orig_w - 1).astype(np.int32)
+            ys = np.clip(pts[:, 1], 0, orig_h - 1).astype(np.int32)
+            score = float(prob_map[ys, xs].mean())
+            points = [(float(x), float(y)) for x, y in zip(xs, ys)]
+            poly_area = float(cv2.contourArea(np.array(points, dtype=np.float32)))
+            area_pct  = 100.0 * poly_area / img_area
+            detections.append({
+                "type"  : "polygon",
+                "points": points,
+                "score" : score,
+                "label" : cname,
+                "_diag_area_pct"  : area_pct,
+                "_diag_n_vertices": len(points),
             })
     return detections
 
@@ -815,8 +901,17 @@ def main():
     else:
         print(f"  ✗ Bbox model      : not found — skipped")
 
-    if model_exists(POLYGON_MODEL_PATH):
-        print(f"  ✓ Polygon model   : {POLYGON_MODEL_PATH}")
+    polygon_seg_classes    = []
+    polygon_seg_input_size = getattr(cfg, "POLYGON_SEG_INPUT_SIZE", 640)
+    if model_exists(POLYGON_SEG_PATH):
+        print(f"  ✓ Polygon model   : {POLYGON_SEG_PATH} (seg)")
+        (models_loaded["polygon_seg"],
+         polygon_seg_classes,
+         polygon_seg_input_size) = load_polygon_seg(POLYGON_SEG_PATH, device)
+        print(f"    classes        : {polygon_seg_classes}")
+        print(f"    input size     : {polygon_seg_input_size}")
+    elif model_exists(POLYGON_MODEL_PATH):
+        print(f"  ✓ Polygon model   : {POLYGON_MODEL_PATH} (YOLO)")
         models_loaded["polygon"] = load_yolo(POLYGON_MODEL_PATH)
     else:
         print(f"  ✗ Polygon model   : not found — skipped")
@@ -876,6 +971,10 @@ def main():
             for n in names:
                 if n not in all_class_names:
                     all_class_names.append(n)
+    # Polygon-seg is per-class — give each label its own color
+    for name in polygon_seg_classes:
+        if name not in all_class_names:
+            all_class_names.append(name)
     # Keypoint-seg is per-class — give each label its own color.
     # The hardcoded "keypoint" entry below is only used by the legacy
     # heatmap path, which is class-agnostic; kept for revert.
@@ -942,7 +1041,15 @@ def main():
             all_preds.extend(preds)
 
         # Polygon
-        if "polygon" in models_loaded:
+        if "polygon_seg" in models_loaded:
+            preds = run_polygon_seg(
+                models_loaded["polygon_seg"],
+                polygon_seg_classes,
+                polygon_seg_input_size,
+                img_path, orig_h, orig_w, device
+            )
+            all_preds.extend(preds)
+        elif "polygon" in models_loaded:
             names = models_loaded["polygon"].names
             if isinstance(names, dict):
                 names = [names[i] for i in sorted(names)]
@@ -1124,7 +1231,7 @@ def main():
         w(f"  Device       : {device}")
         w()
         w("  Models used:")
-        for key in ["bbox", "polygon", "keypoint_seg", "polyline_seg", "tag"]:
+        for key in ["bbox", "polygon", "polygon_seg", "keypoint_seg", "polyline_seg", "tag"]:
             status = "✓" if key in models_loaded else "✗"
             w(f"    {status}  {key}")
         w()

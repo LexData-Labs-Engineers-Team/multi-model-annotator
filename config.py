@@ -136,10 +136,10 @@ import os
 
 # CVAT for Images 1.1 XML — exported directly from CVAT
 # This is the single source of truth for all annotation types
-CVAT_XML        = r"D:\muhtasim\model-trn\multi_pipeline\datasets\bonsai_v2\annotation\all_annotations.xml"
+CVAT_XML        = r"D:\muhtasim\model-trn\multi_pipeline\datasets\flyguys\CVAT_FlyGuys-Training-v3.xml"
 
 # Folder containing all images
-IMG_DIR         = r"D:\muhtasim\model-trn\multi_pipeline\datasets\bonsai_v2\images"
+IMG_DIR         = r"D:\muhtasim\data\flyguys_demo"
 
 # Root output folder — all models, splits, and logs saved here
 SAVE_DIR        = r"D:\muhtasim\model-trn\multi_pipeline\saved"
@@ -169,19 +169,19 @@ MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
 
 TRAIN_BBOX      = True
 TRAIN_POLYGON   = True
-TRAIN_KEYPOINT  = False
-TRAIN_POLYLINE  = False
-TRAIN_TAG       = False
+TRAIN_KEYPOINT  = True
+TRAIN_POLYLINE  = True
+TRAIN_TAG       = True
 
 # ============================================================
 # --- GENERAL TRAINING ---
 # ============================================================
 
 DEVICE          = "cuda"        # "cuda" or "cpu"
-INPUT_SIZE      = 720           # input image size for all models
-VAL_RATIO       = 0.2          # fraction of data used for validation
+INPUT_SIZE      = 640           # input image size for all models
+VAL_RATIO       = 0.25          # fraction of data used for validation
 RANDOM_SEED     = 42
-NUM_WORKERS     = 6
+NUM_WORKERS     = 4
 
 # ImageNet normalization — shared across all models
 PIXEL_MEAN      = [0.485, 0.456, 0.406]
@@ -191,11 +191,11 @@ PIXEL_STD       = [0.229, 0.224, 0.225]
 # --- YOLO (BBOX + POLYGON MODELS) ---
 # ============================================================
 
-YOLO_BBOX_MODEL_SIZE     = "yolo11s.pt"
-YOLO_POLYGON_MODEL_SIZE     = "yolo11s-seg.pt"
+YOLO_BBOX_MODEL_SIZE     = "yolov8s.pt"
+YOLO_POLYGON_MODEL_SIZE     = "yolov8s-seg.pt"
 YOLO_EPOCHS         = 500
 YOLO_BATCH_SIZE     = 12
-YOLO_LR             = 0.01
+YOLO_LR             = 0.001
 YOLO_PATIENCE       = 20
 YOLO_SCORE_THRESH   = 0.25
 YOLO_NMS_THRESH     = 0.45
@@ -203,6 +203,31 @@ YOLO_AUGMENT        = True
 YOLO_OPTIMIZER      = 'AdamW'
 YOLO_MOSAIC         = 1
 YOLO_RETINA_MASKS   = True
+
+# ============================================================
+# --- POLYGON-SEG (HRNet per-class semantic segmentation) ---
+# When POLYGON_USE_SEG is True, master_train.py routes the
+# polygon step to polygon_seg_model/train_polygon_seg.py
+# (HRNet-W18 per-class segmentation + BCE+Dice). Set False to
+# fall back to YOLO-seg (polygon_model/train_polygon.py).
+# ============================================================
+
+POLYGON_USE_SEG              = False
+POLYGON_SEG_BACKBONE         = "hrnet_w18"
+POLYGON_SEG_PRETRAINED       = True
+POLYGON_SEG_INPUT_SIZE       = 640
+POLYGON_SEG_EPOCHS           = 100
+POLYGON_SEG_BATCH_SIZE       = 4
+POLYGON_SEG_LR               = 1e-4
+POLYGON_SEG_WEIGHT_DECAY     = 1e-4
+POLYGON_SEG_WARMUP_ITERS     = 500
+POLYGON_SEG_BCE_WEIGHT       = 1.0
+POLYGON_SEG_DICE_WEIGHT      = 1.0
+POLYGON_SEG_THRESH           = 0.5
+POLYGON_SEG_CHECKPOINT_EVERY = 20
+POLYGON_SEG_CLASSES          = []     # auto-populated at runtime by master_train.py
+POLYGON_SEG_MIN_AREA         = 100    # min contour area (px) to filter noise at inference
+POLYGON_SEG_EPSILON_RATIO    = 0.002  # Douglas-Peucker epsilon as fraction of contour perimeter
 
 # ============================================================
 # --- KEYPOINT MODEL ---

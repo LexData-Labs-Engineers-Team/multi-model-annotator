@@ -250,8 +250,6 @@ def parse_cvat_xml(xml_path):
             all_labels.add(label)
             pts = _parse_points(el.get("points", ""))
             if len(pts) >= 3:
-                # Fix self-intersecting polygons
-                pts = _fix_polygon_winding(pts)
                 img["polygons"].append({"label": label, "points": pts})
 
         # --- Polylines ---

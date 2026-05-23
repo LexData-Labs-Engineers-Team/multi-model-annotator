@@ -410,9 +410,25 @@ def main():
         log("\n  [2/5] POLYGON — disabled in config")
     elif POLYGON_TYPE not in present_types:
         log("\n  [2/5] POLYGON — skipped (no annotations)")
+    elif getattr(cfg, "POLYGON_USE_SEG", False):
+        log("\n" + "═" * 55)
+        log("  [2/5] POLYGON MODEL — Segmentation (HRNet)")
+        log("═" * 55)
+        try:
+            from data_prep.split_annotations import get_labels_for_type
+            classes = get_labels_for_type(images, POLYGON_TYPE)
+            log(f"  Polygon classes (auto-derived): {classes}")
+            from polygon_seg_model.train_polygon_seg import (
+                train as train_polygon_seg
+            )
+            best = train_polygon_seg(images=images, log_fn=log, classes=classes)
+            results[POLYGON_TYPE] = best
+        except Exception as e:
+            log(f"  FAILED: {e}")
+            failures[POLYGON_TYPE] = str(e)
     else:
         log("\n" + "═" * 55)
-        log("  [2/5] POLYGON MODEL")
+        log("  [2/5] POLYGON MODEL — YOLO-seg")
         log("═" * 55)
         try:
             from polygon_model.train_polygon import train as train_polygon
