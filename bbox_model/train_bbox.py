@@ -106,7 +106,7 @@ def train(images, log_fn=print):
         log_fn : logging function from master_train.py
     """
     log_fn("\n" + "─" * 50)
-    log_fn("  BBOX MODEL — YOLOv8n-seg")
+    log_fn(f"  BBOX MODEL — {cfg.YOLO_BBOX_MODEL_SIZE}")
     log_fn("─" * 50)
 
     try:
