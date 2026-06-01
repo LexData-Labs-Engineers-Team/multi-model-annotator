@@ -31,6 +31,7 @@ from collections import defaultdict
 
 import numpy as np
 import cv2
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as cfg
@@ -41,6 +42,9 @@ from data_prep.split_annotations import parse_cvat_xml
 ZERO_EPS    = 0.01    # max_iou below this → always_zero
 HIGH_THRESH = 0.50    # min_iou at-or-above this → always_high
 
+# --- IoU rasterization cap (long side) ---
+IOU_RASTER_MAX_DIM = 512
+
 
 def _percentiles(values, ps):
     """Return percentiles dict or empty dict if no values."""
@@ -50,14 +54,28 @@ def _percentiles(values, ps):
     return {f"p{p}": float(np.percentile(arr, p)) for p in ps}
 
 
-def _polygon_mask(pts, h, w):
-    """Rasterize polygon points (list of (x,y)) onto an (h,w) uint8 mask."""
-    mask = np.zeros((h, w), dtype=np.uint8)
+def _polygon_mask(pts, h, w, scale=1.0):
+    """Rasterize polygon points (list of (x,y)) onto a mask.
+    When scale < 1.0, rasterizes onto a smaller canvas for speed."""
+    sh, sw = int(h * scale), int(w * scale)
+    mask = np.zeros((sh, sw), dtype=np.uint8)
     if len(pts) < 3:
         return mask
-    arr = np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
+    arr = (np.array(pts, dtype=np.float32) * scale).astype(np.int32).reshape(-1, 1, 2)
     cv2.fillPoly(mask, [arr], 1)
     return mask
+
+
+def _polygon_bbox(pts):
+    """Return (x1, y1, x2, y2) bounding box for a polygon."""
+    arr = np.array(pts, dtype=np.float32)
+    return float(arr[:, 0].min()), float(arr[:, 1].min()), \
+           float(arr[:, 0].max()), float(arr[:, 1].max())
+
+
+def _bboxes_overlap(a, b):
+    """Check if two (x1,y1,x2,y2) bounding boxes overlap."""
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
 def _iou(mask_a, mask_b):
@@ -85,7 +103,10 @@ def extract(xml_path, save_path):
     pair_ious = defaultdict(list)   # frozenset({a, b}) → list of IoU values
 
     n_images_with_polys = 0
-    for img in images:
+    n_bbox_skipped = 0
+    n_iou_computed = 0
+
+    for img in tqdm(images, desc="Extracting class priors", unit="img"):
         # Polylines — collect vertex counts independently.
         for pl in img.get("polylines", []):
             pts = pl["points"]
@@ -101,38 +122,54 @@ def extract(xml_path, save_path):
         w = max(1, int(img.get("width",  0)))
         img_area = float(h * w)
 
-        # Per-poly stats.
+        # Per-poly stats (always at full resolution — just contourArea, no raster).
+        bboxes = []
+        valid  = []
         for p in polys:
             pts = p["points"]
             if len(pts) < 3:
+                bboxes.append(None)
+                valid.append(False)
                 continue
             vertex_counts[p["label"]].append(int(len(pts)))
-            poly_arr   = np.array(pts, dtype=np.float32)
-            area       = float(abs(cv2.contourArea(poly_arr)))
+            poly_arr = np.array(pts, dtype=np.float32)
+            area     = float(abs(cv2.contourArea(poly_arr)))
             area_pcts[p["label"]].append(100.0 * area / img_area)
+            bboxes.append(_polygon_bbox(pts))
+            valid.append(True)
 
-        # Pairwise IoUs. Skip same-class self-pairs (a class can overlap
-        # itself across instances — that's a different question).
+        # Pairwise IoUs — bbox pre-filter + downscaled rasterization.
         if len(polys) < 2:
             continue
-        # Rasterize once per polygon in this image.
-        rasters = []
-        for p in polys:
-            if len(p["points"]) < 3:
-                rasters.append(None)
-                continue
-            rasters.append(_polygon_mask(p["points"], h, w))
+
+        iou_scale = min(1.0, IOU_RASTER_MAX_DIM / max(h, w))
+
+        rasters = [None] * len(polys)
         for i in range(len(polys)):
             for j in range(i + 1, len(polys)):
+                if not valid[i] or not valid[j]:
+                    continue
                 a_lab = polys[i]["label"]
                 b_lab = polys[j]["label"]
                 if a_lab == b_lab:
                     continue
-                ma, mb = rasters[i], rasters[j]
-                if ma is None or mb is None:
+
+                if not _bboxes_overlap(bboxes[i], bboxes[j]):
+                    key = tuple(sorted((a_lab, b_lab)))
+                    pair_ious[key].append(0.0)
+                    n_bbox_skipped += 1
                     continue
+
+                if rasters[i] is None:
+                    rasters[i] = _polygon_mask(polys[i]["points"], h, w, iou_scale)
+                if rasters[j] is None:
+                    rasters[j] = _polygon_mask(polys[j]["points"], h, w, iou_scale)
+
                 key = tuple(sorted((a_lab, b_lab)))
-                pair_ious[key].append(_iou(ma, mb))
+                pair_ious[key].append(_iou(rasters[i], rasters[j]))
+                n_iou_computed += 1
+
+    print(f"IoU pairs computed: {n_iou_computed}  |  skipped (no bbox overlap): {n_bbox_skipped}")
 
     # --- Build polygon_classes section ---
     polygon_classes = {}

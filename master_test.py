@@ -38,7 +38,7 @@ import config as cfg
 # ============================================================
 
 # Folder of images to run inference on
-IMAGES_DIR      = cfg.IMG_DIR
+IMAGES_DIR      = r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\images_large"
 
 # Output folder
 OUTPUT_DIR      = os.path.join(cfg.SAVE_DIR, "test_output")

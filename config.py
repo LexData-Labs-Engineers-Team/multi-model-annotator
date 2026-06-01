@@ -136,13 +136,13 @@ import os
 
 # CVAT for Images 1.1 XML — exported directly from CVAT
 # This is the single source of truth for all annotation types
-CVAT_XML        = r"D:\muhtasim\model-trn\multi_pipeline\datasets\flyguys\CVAT_FlyGuys-Training-v3.xml"
+CVAT_XML        = r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\cvat_dfghjkl.xml"
 
 # Folder containing all images
-IMG_DIR         = r"D:\muhtasim\data\flyguys_demo"
+IMG_DIR         = r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\images"
 
 # Root output folder — all models, splits, and logs saved here
-SAVE_DIR        = r"D:\muhtasim\model-trn\multi_pipeline\saved"
+SAVE_DIR        = r"D:\muhtasim\model-trn\multi_pipeline\saved\cricket"
 
 # ============================================================
 # --- DERIVED PATHS — auto-set, do not edit ---
@@ -179,7 +179,7 @@ TRAIN_TAG       = True
 
 DEVICE          = "cuda"        # "cuda" or "cpu"
 INPUT_SIZE      = 640           # input image size for all models
-VAL_RATIO       = 0.25          # fraction of data used for validation
+VAL_RATIO       = 0.2          # fraction of data used for validation
 RANDOM_SEED     = 42
 NUM_WORKERS     = 4
 
@@ -191,11 +191,11 @@ PIXEL_STD       = [0.229, 0.224, 0.225]
 # --- YOLO (BBOX + POLYGON MODELS) ---
 # ============================================================
 
-YOLO_BBOX_MODEL_SIZE     = "yolov8s.pt"
-YOLO_POLYGON_MODEL_SIZE     = "yolov8s-seg.pt"
-YOLO_EPOCHS         = 500
-YOLO_BATCH_SIZE     = 12
-YOLO_LR             = 0.001
+YOLO_BBOX_MODEL_SIZE     = "yolov8n.pt"
+YOLO_POLYGON_MODEL_SIZE     = "yolov8n-seg.pt"
+YOLO_EPOCHS         = 200
+YOLO_BATCH_SIZE     = 8
+YOLO_LR             = 0.01
 YOLO_PATIENCE       = 20
 YOLO_SCORE_THRESH   = 0.25
 YOLO_NMS_THRESH     = 0.45
