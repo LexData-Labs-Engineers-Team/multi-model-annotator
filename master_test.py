@@ -50,7 +50,6 @@ POLYGON_MODEL_PATH  = os.path.join(cfg.POLYGON_SAVE_DIR,
                                    "train", "weights", "best.pt")
 POLYGON_SEG_PATH    = os.path.join(cfg.POLYGON_SAVE_DIR,
                                    "best_polygon_seg.pt")
-KEYPOINT_MODEL_PATH = os.path.join(cfg.KEYPOINT_SAVE_DIR, "best.pt")
 KEYPOINT_SEG_PATH   = os.path.join(cfg.KEYPOINT_SAVE_DIR, "best_seg.pt")
 POLYLINE_SEG_PATH   = os.path.join(cfg.POLYLINE_SAVE_DIR, "best_seg.pt")
 TAG_MODEL_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "best.pt")
@@ -59,7 +58,6 @@ TAG_NAMES_PATH      = os.path.join(cfg.TAG_SAVE_DIR,      "tag_names.json")
 # ---- Inference thresholds ----
 BBOX_SCORE_THRESH   = cfg.YOLO_SCORE_THRESH
 POLY_SCORE_THRESH   = cfg.YOLO_SCORE_THRESH
-KP_SCORE_THRESH     = cfg.KP_SCORE_THRESH
 KP_SEG_THRESH       = cfg.KP_SEG_THRESH
 KP_SEG_NMS_MIN_DIST = cfg.KP_SEG_NMS_MIN_DIST
 POLY_SEG_THRESH     = cfg.POLY_SEG_THRESH
@@ -123,20 +121,6 @@ def model_exists(path):
 def load_yolo(path):
     from ultralytics import YOLO
     model = YOLO(path)
-    return model
-
-
-def load_heatmap_model(path, backbone, device):
-    sys.path.insert(0, os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "keypoint_model"
-    ))
-    from train_keypoint import KeypointHeatmapModel
-    ckpt  = torch.load(path, map_location=device)
-    model = KeypointHeatmapModel(backbone=backbone, pretrained=False)
-    state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
-    model.load_state_dict(state)
-    model.to(device)
-    model.eval()
     return model
 
 
@@ -378,41 +362,6 @@ def run_polygon_seg(model, classes, input_size, img_path,
                 "_diag_area_pct"  : area_pct,
                 "_diag_n_vertices": len(points),
             })
-    return detections
-
-
-def run_keypoints(model, img_path, orig_h, orig_w, device):
-    tensor, _, _, _ = preprocess(img_path, cfg.INPUT_SIZE)
-    if tensor is None:
-        return []
-    tensor = tensor.to(device)
-    with torch.no_grad():
-        heatmap = model(tensor)
-        heatmap = F.interpolate(
-            heatmap, size=(orig_h, orig_w),
-            mode="bilinear", align_corners=False
-        )
-        heatmap = heatmap.sigmoid().squeeze().cpu().numpy()
-
-    # Extract local maxima as keypoints. NMS window is set from the
-    # training heatmap sigma (≈ 2σ+1) so peaks closer than the training
-    # blob radius collapse but real separated keypoints survive.
-    from scipy.ndimage import maximum_filter
-    nms_size      = max(3, 2 * int(cfg.KP_HEATMAP_SIGMA) + 1)
-    local_max     = (heatmap == maximum_filter(heatmap, size=nms_size))
-    above_thresh  = heatmap > KP_SCORE_THRESH
-    peaks         = local_max & above_thresh
-    coords        = np.argwhere(peaks)   # (N, 2) in (y, x)
-
-    detections = []
-    for (y, x) in coords:
-        detections.append({
-            "type" : "keypoint",
-            "x"    : float(x),
-            "y"    : float(y),
-            "score": float(heatmap[y, x]),
-            "label": "keypoint",
-        })
     return detections
 
 
@@ -923,13 +872,6 @@ def main():
         (models_loaded["keypoint_seg"],
          kp_classes,
          kp_input_size) = load_keypoint_seg(KEYPOINT_SEG_PATH, device)
-    # LEGACY KEYPOINT — kept for revert; see keypoint_seg_model/train_keypoint_seg.py.
-    # Uncomment the elif block below to fall back to the heatmap model.
-    # elif model_exists(KEYPOINT_MODEL_PATH):
-    #     print(f"  ✓ Keypoint model  : {KEYPOINT_MODEL_PATH} (legacy)")
-    #     models_loaded["keypoint"] = load_heatmap_model(
-    #         KEYPOINT_MODEL_PATH, cfg.KP_BACKBONE, device
-    #     )
     else:
         print(f"  ✗ Keypoint model  : not found — skipped")
 
@@ -975,14 +917,10 @@ def main():
     for name in polygon_seg_classes:
         if name not in all_class_names:
             all_class_names.append(name)
-    # Keypoint-seg is per-class — give each label its own color.
-    # The hardcoded "keypoint" entry below is only used by the legacy
-    # heatmap path, which is class-agnostic; kept for revert.
+    # Keypoint-seg is per-class — give each label its own color
     for name in kp_classes:
         if name not in all_class_names:
             all_class_names.append(name)
-    if "keypoint" not in all_class_names:
-        all_class_names.append("keypoint")
     # Polyline-seg is per-class — give each label its own color
     for name in polyline_classes:
         if name not in all_class_names:
@@ -1066,13 +1004,6 @@ def main():
                 img_path, orig_h, orig_w, device
             )
             all_preds.extend(preds)
-        # LEGACY KEYPOINT — kept for revert.
-        # if "keypoint" in models_loaded:
-        #     preds = run_keypoints(
-        #         models_loaded["keypoint"], img_path,
-        #         orig_h, orig_w, device
-        #     )
-        #     all_preds.extend(preds)
 
         # Polylines (HRNet seg)
         if "polyline_seg" in models_loaded:
