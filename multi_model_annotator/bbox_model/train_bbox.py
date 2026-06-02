@@ -91,12 +91,12 @@ import time
 import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config as cfg
-from data_prep.split_annotations import (
+from multi_model_annotator import config as cfg
+from multi_model_annotator.data_prep.split_annotations import (
     parse_cvat_xml, filter_images_by_type,
     get_labels_for_type, BBOX_TYPE
 )
-from data_prep.coco_to_yolo import xml_to_yolo
+from multi_model_annotator.data_prep.coco_to_yolo import xml_to_yolo
 
 
 def train(images, log_fn=print):

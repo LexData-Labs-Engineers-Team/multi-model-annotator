@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-model-annotator"
+version = "0.1.0"
+description = "Multi-model auto-annotator (bbox/polygon/keypoint/polyline) for LexAnnotate / Observer AI"
+readme = "README.md"
+requires-python = ">=3.10"
+# torch / torchvision are intentionally UNPINNED (no CUDA index here): the
+# consuming image installs the right torch first (CPU in the backend, CUDA in
+# the training/SageMaker images), and pip then sees it as already satisfied and
+# does NOT replace it. Installing this package standalone pulls the default
+# PyPI torch, which is fine for local model development.
+dependencies = [
+    "torch",
+    "torchvision",
+    "timm>=1.0.0",
+    "ultralytics>=8.4.0,<9",
+    "opencv-contrib-python>=4.8.1.78",
+    "scikit-image>=0.22",
+    "Pillow>=10.0",
+    "numpy>=1.24.3",
+    "scipy>=1.11",
+    "PyYAML>=6.0",
+    "matplotlib>=3.7",
+]
+
+[tool.setuptools.packages.find]
+include = ["multi_model_annotator*"]

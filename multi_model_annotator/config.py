@@ -11,13 +11,21 @@ import os
 
 # CVAT for Images 1.1 XML — exported directly from CVAT
 # This is the single source of truth for all annotation types
-CVAT_XML        = r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\cvat_dfghjkl.xml"
+# Env-overridable (CVAT_XML) so an external orchestrator can inject a per-job
+# path; the default preserves standalone behaviour on the original machine.
+CVAT_XML        = os.environ.get(
+    "CVAT_XML",
+    r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\cvat_dfghjkl.xml")
 
 # Folder containing all images
-IMG_DIR         = r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\images"
+IMG_DIR         = os.environ.get(
+    "IMG_DIR",
+    r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\images")
 
 # Root output folder — all models, splits, and logs saved here
-SAVE_DIR        = r"D:\muhtasim\model-trn\multi_pipeline\saved\cricket"
+SAVE_DIR        = os.environ.get(
+    "SAVE_DIR",
+    r"D:\muhtasim\model-trn\multi_pipeline\saved\cricket-test2")
 
 # ============================================================
 # --- DERIVED PATHS — auto-set, do not edit ---
@@ -42,17 +50,36 @@ MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
 # --- MODEL ENABLE/DISABLE (True = train, False = skip) ---
 # ============================================================
 
-TRAIN_BBOX      = True
-TRAIN_POLYGON   = True
-TRAIN_KEYPOINT  = True
-TRAIN_POLYLINE  = True
-TRAIN_TAG       = True
+# Env-overridable so an external orchestrator can disable a task per job
+# (e.g. TRAIN_TAG=false). Defaults preserve standalone behaviour.
+def _env_bool(key, default):
+    v = os.environ.get(key)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+# Env-overridable int (e.g. an orchestrator sets per-job epoch budgets, or a
+# smoke test runs 1-2 epochs). Defaults preserve standalone behaviour.
+def _env_int(key, default):
+    v = os.environ.get(key)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+TRAIN_BBOX      = _env_bool("TRAIN_BBOX",     True)
+TRAIN_POLYGON   = _env_bool("TRAIN_POLYGON",  True)
+TRAIN_KEYPOINT  = _env_bool("TRAIN_KEYPOINT", True)
+TRAIN_POLYLINE  = _env_bool("TRAIN_POLYLINE", True)
+TRAIN_TAG       = _env_bool("TRAIN_TAG",      True)
 
 # ============================================================
 # --- GENERAL TRAINING ---
 # ============================================================
 
-DEVICE          = "cuda"        # "cuda" or "cpu"
+DEVICE          = os.environ.get("DEVICE", "cuda")  # "cuda" or "cpu"
 INPUT_SIZE      = 640           # input image size for all models
 VAL_RATIO       = 0.2          # fraction of data used for validation
 RANDOM_SEED     = 42
@@ -68,7 +95,7 @@ PIXEL_STD       = [0.229, 0.224, 0.225]
 
 YOLO_BBOX_MODEL_SIZE     = "yolov8n.pt"
 YOLO_POLYGON_MODEL_SIZE     = "yolov8n-seg.pt"
-YOLO_EPOCHS         = 200
+YOLO_EPOCHS         = _env_int("YOLO_EPOCHS", 200)
 YOLO_BATCH_SIZE     = 8
 YOLO_LR             = 0.01
 YOLO_PATIENCE       = 20
@@ -91,7 +118,7 @@ POLYGON_USE_SEG              = False
 POLYGON_SEG_BACKBONE         = "hrnet_w18"
 POLYGON_SEG_PRETRAINED       = True
 POLYGON_SEG_INPUT_SIZE       = 640
-POLYGON_SEG_EPOCHS           = 100
+POLYGON_SEG_EPOCHS           = _env_int("POLYGON_SEG_EPOCHS", 100)
 POLYGON_SEG_BATCH_SIZE       = 4
 POLYGON_SEG_LR               = 1e-4
 POLYGON_SEG_WEIGHT_DECAY     = 1e-4
@@ -139,7 +166,7 @@ CLASS_PRIORS_PATH     = os.path.join(SAVE_DIR, "class_priors.json")
 POLY_SEG_BACKBONE         = "hrnet_w18"
 POLY_SEG_PRETRAINED       = True
 POLY_SEG_INPUT_SIZE       = 640
-POLY_SEG_EPOCHS           = 100
+POLY_SEG_EPOCHS           = _env_int("POLY_SEG_EPOCHS", 100)
 POLY_SEG_BATCH_SIZE       = 4
 POLY_SEG_LR               = 1e-4
 POLY_SEG_WEIGHT_DECAY     = 1e-4
@@ -161,7 +188,7 @@ POLY_SEG_CLASSES          = []   # auto-populated at runtime by master_train.py
 KP_SEG_BACKBONE          = "hrnet_w18"
 KP_SEG_PRETRAINED        = True
 KP_SEG_INPUT_SIZE        = 640
-KP_SEG_EPOCHS            = 100
+KP_SEG_EPOCHS            = _env_int("KP_SEG_EPOCHS", 100)
 KP_SEG_BATCH_SIZE        = 4
 KP_SEG_LR                = 1e-4
 KP_SEG_WEIGHT_DECAY      = 1e-4

@@ -34,8 +34,8 @@ import cv2
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config as cfg
-from data_prep.split_annotations import parse_cvat_xml
+from multi_model_annotator import config as cfg
+from multi_model_annotator.data_prep.split_annotations import parse_cvat_xml
 
 
 # --- Relation classification thresholds ---
