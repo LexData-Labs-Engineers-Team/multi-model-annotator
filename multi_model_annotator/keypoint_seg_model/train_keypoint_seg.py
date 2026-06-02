@@ -28,8 +28,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config as cfg
-from polyline_model_working.train_polyline_seg import (
+from multi_model_annotator import config as cfg
+from multi_model_annotator.polyline_model_working.train_polyline_seg import (
     HRNetSegModel, bce_dice_loss, compute_iou,
 )
 

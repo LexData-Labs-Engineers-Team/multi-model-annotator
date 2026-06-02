@@ -31,7 +31,7 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import config as cfg
+from multi_model_annotator import config as cfg
 
 # ============================================================
 # --- USER SETTINGS — Edit before running ---
@@ -129,7 +129,7 @@ def load_keypoint_seg(path, device):
     (model, classes, input_size). The checkpoint embeds its own
     backbone / classes / input_size / disk_radius config so we
     don't need cfg values to instantiate the model."""
-    from keypoint_seg_model.train_keypoint_seg import HRNetSegModel
+    from multi_model_annotator.keypoint_seg_model.train_keypoint_seg import HRNetSegModel
     ckpt = torch.load(path, map_location=device, weights_only=False)
     if "config" not in ckpt or "state_dict" not in ckpt:
         raise RuntimeError(
@@ -153,7 +153,7 @@ def load_polygon_seg(path, device):
     (model, classes, input_size). The checkpoint embeds its own
     backbone / classes / input_size config so we don't need cfg
     values to instantiate the model."""
-    from polygon_seg_model.train_polygon_seg import HRNetSegModel
+    from multi_model_annotator.polygon_seg_model.train_polygon_seg import HRNetSegModel
     ckpt = torch.load(path, map_location=device, weights_only=False)
     if "config" not in ckpt or "state_dict" not in ckpt:
         raise RuntimeError(
@@ -176,7 +176,7 @@ def load_polyline_seg(path, device):
     """Load the HRNet polyline-seg checkpoint and return
     (model, classes, input_size). The checkpoint embeds its own
     backbone / classes / input_size config so we don't need cfg values."""
-    from polyline_model_working.train_polyline_seg import HRNetSegModel
+    from multi_model_annotator.polyline_model_working.train_polyline_seg import HRNetSegModel
     ckpt = torch.load(path, map_location=device, weights_only=False)
     if "config" not in ckpt or "state_dict" not in ckpt:
         raise RuntimeError(
@@ -311,7 +311,7 @@ def run_polygon_seg(model, classes, input_size, img_path,
     Forward → sigmoid → upsample to original resolution → per class:
     threshold → findContours → filter by min area → Douglas-Peucker
     simplify → emit polygon detections."""
-    from test_polyline_seg import _preprocess
+    from multi_model_annotator.test_polyline_seg import _preprocess
 
     bgr = cv2.imread(img_path)
     if bgr is None:
@@ -372,7 +372,7 @@ def run_keypoints_seg(model, classes, input_size, img_path,
     threshold → connected components → centroid + per-component max
     probability as score → greedy distance-based NMS. Emits one
     detection per surviving peak with its true class label."""
-    from test_polyline_seg import _preprocess
+    from multi_model_annotator.test_polyline_seg import _preprocess
 
     bgr = cv2.imread(img_path)
     if bgr is None:
@@ -438,7 +438,7 @@ def run_polylines_seg(model, classes, input_size, img_path,
     skeletonize → trace 8-connected chains → Douglas-Peucker simplify.
     Reuses the helpers defined in test_polyline_seg.py to keep skeleton
     + trace logic in one place."""
-    from test_polyline_seg import (
+    from multi_model_annotator.test_polyline_seg import (
         _preprocess, _skeletonize, _trace_polylines, _simplify_chain,
         MIN_CHAIN_LEN,
     )
@@ -946,7 +946,7 @@ def main():
     # --------------------------------------------------------
     shape_priors = None
     if getattr(cfg, "SHAPE_REFINER_ENABLED", False):
-        from shape_refiner import load_priors, refine_predictions
+        from multi_model_annotator.shape_refiner import load_priors, refine_predictions
         shape_priors = load_priors(cfg.CLASS_PRIORS_PATH)
         if shape_priors is None:
             print(f"  ! SHAPE_REFINER_ENABLED but priors not found at "

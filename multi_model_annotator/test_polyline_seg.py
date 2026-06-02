@@ -23,8 +23,8 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import config as cfg
-from polyline_model_working.train_polyline_seg import HRNetSegModel
+from multi_model_annotator import config as cfg
+from multi_model_annotator.polyline_model_working.train_polyline_seg import HRNetSegModel
 
 # ============================================================
 # --- USER SETTINGS — edit before running ---

@@ -16,8 +16,8 @@ import time
 import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import config as cfg
-from data_prep.split_annotations import (
+from multi_model_annotator import config as cfg
+from multi_model_annotator.data_prep.split_annotations import (
     parse_cvat_xml,
     detect_annotation_types,
     BBOX_TYPE, POLYGON_TYPE, KEYPOINT_TYPE, POLYLINE_TYPE, TAG_TYPE
@@ -137,7 +137,7 @@ def main():
         log("  [1/5] BBOX MODEL")
         log("═" * 55)
         try:
-            from bbox_model.train_bbox import train as train_bbox
+            from multi_model_annotator.bbox_model.train_bbox import train as train_bbox
             best = train_bbox(images=images, log_fn=log)
             results[BBOX_TYPE] = best
         except Exception as e:
@@ -154,10 +154,10 @@ def main():
         log("  [2/5] POLYGON MODEL — Segmentation (HRNet)")
         log("═" * 55)
         try:
-            from data_prep.split_annotations import get_labels_for_type
+            from multi_model_annotator.data_prep.split_annotations import get_labels_for_type
             classes = get_labels_for_type(images, POLYGON_TYPE)
             log(f"  Polygon classes (auto-derived): {classes}")
-            from polygon_seg_model.train_polygon_seg import (
+            from multi_model_annotator.polygon_seg_model.train_polygon_seg import (
                 train as train_polygon_seg
             )
             best = train_polygon_seg(images=images, log_fn=log, classes=classes)
@@ -170,7 +170,7 @@ def main():
         log("  [2/5] POLYGON MODEL — YOLO-seg")
         log("═" * 55)
         try:
-            from polygon_model.train_polygon import train as train_polygon
+            from multi_model_annotator.polygon_model.train_polygon import train as train_polygon
             best = train_polygon(images=images, log_fn=log)
             results[POLYGON_TYPE] = best
         except Exception as e:
@@ -187,10 +187,10 @@ def main():
         log("  [3/5] KEYPOINT MODEL — Segmentation (HRNet)")
         log("═" * 55)
         try:
-            from data_prep.split_annotations import get_labels_for_type
+            from multi_model_annotator.data_prep.split_annotations import get_labels_for_type
             classes = get_labels_for_type(images, KEYPOINT_TYPE)
             log(f"  Keypoint classes (auto-derived): {classes}")
-            from keypoint_seg_model.train_keypoint_seg import (
+            from multi_model_annotator.keypoint_seg_model.train_keypoint_seg import (
                 train as train_kp_seg
             )
             best = train_kp_seg(images=images, log_fn=log, classes=classes)
@@ -209,10 +209,10 @@ def main():
         log("  [4/5] POLYLINE MODEL — Segmentation (HRNet)")
         log("═" * 55)
         try:
-            from data_prep.split_annotations import get_labels_for_type
+            from multi_model_annotator.data_prep.split_annotations import get_labels_for_type
             classes = get_labels_for_type(images, POLYLINE_TYPE)
             log(f"  Polyline classes (auto-derived): {classes}")
-            from polyline_model_working.train_polyline_seg import (
+            from multi_model_annotator.polyline_model_working.train_polyline_seg import (
                 train as train_seg
             )
             best = train_seg(images=images, log_fn=log, classes=classes)
@@ -231,7 +231,7 @@ def main():
         log("  [5/5] TAG MODEL")
         log("═" * 55)
         try:
-            from tag_model.train_tag import train as train_tag
+            from multi_model_annotator.tag_model.train_tag import train as train_tag
             best = train_tag(images=images, log_fn=log)
             results[TAG_TYPE] = best
         except Exception as e:
