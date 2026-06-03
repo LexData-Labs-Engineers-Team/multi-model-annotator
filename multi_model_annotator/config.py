@@ -13,38 +13,38 @@ import os
 # This is the single source of truth for all annotation types
 # Env-overridable (CVAT_XML) so an external orchestrator can inject a per-job
 # path; the default preserves standalone behaviour on the original machine.
-CVAT_XML        = os.environ.get(
-    "CVAT_XML",
-    r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\cvat_dfghjkl.xml")
+# CVAT_XML        = os.environ.get(
+#     "CVAT_XML",
+#     r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\cvat_dfghjkl.xml")
 
 # Folder containing all images
-IMG_DIR         = os.environ.get(
-    "IMG_DIR",
-    r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\images")
+# IMG_DIR         = os.environ.get(
+#     "IMG_DIR",
+#     r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\images")
 
 # Root output folder — all models, splits, and logs saved here
-SAVE_DIR        = os.environ.get(
-    "SAVE_DIR",
-    r"D:\muhtasim\model-trn\multi_pipeline\saved\cricket-test2")
+# SAVE_DIR        = os.environ.get(
+#     "SAVE_DIR",
+#     r"D:\muhtasim\model-trn\multi_pipeline\saved\cricket-test2")
 
 # ============================================================
 # --- DERIVED PATHS — auto-set, do not edit ---
 # ============================================================
 
 # YOLO format data directories (converted from XML at runtime)
-DATA_DIR            = os.path.join(SAVE_DIR, "data")
-YOLO_BBOX_DIR       = os.path.join(DATA_DIR, "yolo_bbox")
-YOLO_POLYGON_DIR    = os.path.join(DATA_DIR, "yolo_polygon")
+# DATA_DIR            = os.path.join(SAVE_DIR, "data")
+# YOLO_BBOX_DIR       = os.path.join(DATA_DIR, "yolo_bbox")
+# YOLO_POLYGON_DIR    = os.path.join(DATA_DIR, "yolo_polygon")
 
-# Model save directories
-BBOX_SAVE_DIR       = os.path.join(SAVE_DIR, "bbox_model")
-POLYGON_SAVE_DIR    = os.path.join(SAVE_DIR, "polygon_model")
-KEYPOINT_SAVE_DIR   = os.path.join(SAVE_DIR, "keypoint_model")
-POLYLINE_SAVE_DIR   = os.path.join(SAVE_DIR, "polyline_model")
-TAG_SAVE_DIR        = os.path.join(SAVE_DIR, "tag_model")
+# # Model save directories
+# BBOX_SAVE_DIR       = os.path.join(SAVE_DIR, "bbox_model")
+# POLYGON_SAVE_DIR    = os.path.join(SAVE_DIR, "polygon_model")
+# KEYPOINT_SAVE_DIR   = os.path.join(SAVE_DIR, "keypoint_model")
+# POLYLINE_SAVE_DIR   = os.path.join(SAVE_DIR, "polyline_model")
+# TAG_SAVE_DIR        = os.path.join(SAVE_DIR, "tag_model")
 
-# Master log
-MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
+# # Master log
+# MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
 
 # ============================================================
 # --- MODEL ENABLE/DISABLE (True = train, False = skip) ---
@@ -95,7 +95,7 @@ PIXEL_STD       = [0.229, 0.224, 0.225]
 
 YOLO_BBOX_MODEL_SIZE     = "yolov8n.pt"
 YOLO_POLYGON_MODEL_SIZE     = "yolov8n-seg.pt"
-YOLO_EPOCHS         = _env_int("YOLO_EPOCHS", 200)
+YOLO_EPOCHS         = _env_int("YOLO_EPOCHS", 50)
 YOLO_BATCH_SIZE     = 8
 YOLO_LR             = 0.01
 YOLO_PATIENCE       = 20
@@ -118,7 +118,7 @@ POLYGON_USE_SEG              = False
 POLYGON_SEG_BACKBONE         = "hrnet_w18"
 POLYGON_SEG_PRETRAINED       = True
 POLYGON_SEG_INPUT_SIZE       = 640
-POLYGON_SEG_EPOCHS           = _env_int("POLYGON_SEG_EPOCHS", 100)
+POLYGON_SEG_EPOCHS           = _env_int("POLYGON_SEG_EPOCHS", 50)
 POLYGON_SEG_BATCH_SIZE       = 4
 POLYGON_SEG_LR               = 1e-4
 POLYGON_SEG_WEIGHT_DECAY     = 1e-4
@@ -166,7 +166,7 @@ CLASS_PRIORS_PATH     = os.path.join(SAVE_DIR, "class_priors.json")
 POLY_SEG_BACKBONE         = "hrnet_w18"
 POLY_SEG_PRETRAINED       = True
 POLY_SEG_INPUT_SIZE       = 640
-POLY_SEG_EPOCHS           = _env_int("POLY_SEG_EPOCHS", 100)
+POLY_SEG_EPOCHS           = _env_int("POLY_SEG_EPOCHS", 50)
 POLY_SEG_BATCH_SIZE       = 4
 POLY_SEG_LR               = 1e-4
 POLY_SEG_WEIGHT_DECAY     = 1e-4
@@ -188,7 +188,7 @@ POLY_SEG_CLASSES          = []   # auto-populated at runtime by master_train.py
 KP_SEG_BACKBONE          = "hrnet_w18"
 KP_SEG_PRETRAINED        = True
 KP_SEG_INPUT_SIZE        = 640
-KP_SEG_EPOCHS            = _env_int("KP_SEG_EPOCHS", 100)
+KP_SEG_EPOCHS            = _env_int("KP_SEG_EPOCHS", 50)
 KP_SEG_BATCH_SIZE        = 4
 KP_SEG_LR                = 1e-4
 KP_SEG_WEIGHT_DECAY      = 1e-4
