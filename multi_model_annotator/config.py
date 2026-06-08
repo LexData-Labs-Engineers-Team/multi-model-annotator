@@ -9,42 +9,40 @@ import os
 # --- PATHS --- Edit these before running
 # ============================================================
 
-# CVAT for Images 1.1 XML — exported directly from CVAT
-# This is the single source of truth for all annotation types
-# Env-overridable (CVAT_XML) so an external orchestrator can inject a per-job
-# path; the default preserves standalone behaviour on the original machine.
-# CVAT_XML        = os.environ.get(
-#     "CVAT_XML",
-#     r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\cvat_dfghjkl.xml")
+# CVAT for Images 1.1 XML — exported directly from CVAT (single source of truth
+# for all annotation types). Injected per-job via env by the orchestrator; the
+# hardcoded local fallbacks were removed (only an env value is used in practice).
+CVAT_XML = os.environ.get("CVAT_XML", "")
 
-# Folder containing all images
-# IMG_DIR         = os.environ.get(
-#     "IMG_DIR",
-#     r"D:\muhtasim\model-trn\multi_pipeline\datasets\cricket\images")
+# Folder containing all images — injected per-job via env.
+IMG_DIR = os.environ.get("IMG_DIR", "")
 
-# Root output folder — all models, splits, and logs saved here
-# SAVE_DIR        = os.environ.get(
-#     "SAVE_DIR",
-#     r"D:\muhtasim\model-trn\multi_pipeline\saved\cricket-test2")
+# Root output folder — all models, splits, and logs saved here.
+# The orchestrator injects SAVE_DIR per job, set to the SAME
+# /models/<org>/<project>/training_<job>_<attempt> layout the standard
+# (untouched) YOLO pipeline writes to — so the custom model lands and is
+# registered/viewable identically. Falls back to ./mp_output ONLY for a
+# standalone local run with no env set.
+SAVE_DIR = os.environ.get("SAVE_DIR") or os.path.join(os.getcwd(), "mp_output")
 
 # ============================================================
 # --- DERIVED PATHS — auto-set, do not edit ---
 # ============================================================
 
 # YOLO format data directories (converted from XML at runtime)
-# DATA_DIR            = os.path.join(SAVE_DIR, "data")
-# YOLO_BBOX_DIR       = os.path.join(DATA_DIR, "yolo_bbox")
-# YOLO_POLYGON_DIR    = os.path.join(DATA_DIR, "yolo_polygon")
+DATA_DIR            = os.path.join(SAVE_DIR, "data")
+YOLO_BBOX_DIR       = os.path.join(DATA_DIR, "yolo_bbox")
+YOLO_POLYGON_DIR    = os.path.join(DATA_DIR, "yolo_polygon")
 
-# # Model save directories
-# BBOX_SAVE_DIR       = os.path.join(SAVE_DIR, "bbox_model")
-# POLYGON_SAVE_DIR    = os.path.join(SAVE_DIR, "polygon_model")
-# KEYPOINT_SAVE_DIR   = os.path.join(SAVE_DIR, "keypoint_model")
-# POLYLINE_SAVE_DIR   = os.path.join(SAVE_DIR, "polyline_model")
-# TAG_SAVE_DIR        = os.path.join(SAVE_DIR, "tag_model")
+# Model save directories
+BBOX_SAVE_DIR       = os.path.join(SAVE_DIR, "bbox_model")
+POLYGON_SAVE_DIR    = os.path.join(SAVE_DIR, "polygon_model")
+KEYPOINT_SAVE_DIR   = os.path.join(SAVE_DIR, "keypoint_model")
+POLYLINE_SAVE_DIR   = os.path.join(SAVE_DIR, "polyline_model")
+TAG_SAVE_DIR        = os.path.join(SAVE_DIR, "tag_model")
 
-# # Master log
-# MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
+# Master log
+MASTER_LOG          = os.path.join(SAVE_DIR, "master_train_log.txt")
 
 # ============================================================
 # --- MODEL ENABLE/DISABLE (True = train, False = skip) ---
@@ -80,7 +78,7 @@ TRAIN_TAG       = _env_bool("TRAIN_TAG",      True)
 # ============================================================
 
 DEVICE          = os.environ.get("DEVICE", "cuda")  # "cuda" or "cpu"
-INPUT_SIZE      = 640           # input image size for all models
+INPUT_SIZE      = _env_int("INPUT_SIZE", 640)   # env-overridable image size (all models)
 VAL_RATIO       = 0.2          # fraction of data used for validation
 RANDOM_SEED     = 42
 NUM_WORKERS     = _env_int("NUM_WORKERS", 4)   # env-overridable; lowered on small-VRAM hosts
@@ -117,9 +115,9 @@ YOLO_RETINA_MASKS   = True
 POLYGON_USE_SEG              = False
 POLYGON_SEG_BACKBONE         = "hrnet_w18"
 POLYGON_SEG_PRETRAINED       = True
-POLYGON_SEG_INPUT_SIZE       = 640
+POLYGON_SEG_INPUT_SIZE       = _env_int("POLYGON_SEG_INPUT_SIZE", 640)
 POLYGON_SEG_EPOCHS           = _env_int("POLYGON_SEG_EPOCHS", 50)
-POLYGON_SEG_BATCH_SIZE       = 4
+POLYGON_SEG_BATCH_SIZE       = _env_int("POLYGON_SEG_BATCH_SIZE", 4)
 POLYGON_SEG_LR               = 1e-4
 POLYGON_SEG_WEIGHT_DECAY     = 1e-4
 POLYGON_SEG_WARMUP_ITERS     = 500
@@ -165,9 +163,9 @@ CLASS_PRIORS_PATH     = os.path.join(SAVE_DIR, "class_priors.json")
 
 POLY_SEG_BACKBONE         = "hrnet_w18"
 POLY_SEG_PRETRAINED       = True
-POLY_SEG_INPUT_SIZE       = 640
+POLY_SEG_INPUT_SIZE       = _env_int("POLY_SEG_INPUT_SIZE", 640)
 POLY_SEG_EPOCHS           = _env_int("POLY_SEG_EPOCHS", 50)
-POLY_SEG_BATCH_SIZE       = 4
+POLY_SEG_BATCH_SIZE       = _env_int("POLY_SEG_BATCH_SIZE", 4)
 POLY_SEG_LR               = 1e-4
 POLY_SEG_WEIGHT_DECAY     = 1e-4
 POLY_SEG_WARMUP_ITERS     = 500
@@ -187,9 +185,9 @@ POLY_SEG_CLASSES          = []   # auto-populated at runtime by master_train.py
 
 KP_SEG_BACKBONE          = "hrnet_w18"
 KP_SEG_PRETRAINED        = True
-KP_SEG_INPUT_SIZE        = 640
+KP_SEG_INPUT_SIZE        = _env_int("KP_SEG_INPUT_SIZE", 640)
 KP_SEG_EPOCHS            = _env_int("KP_SEG_EPOCHS", 50)
-KP_SEG_BATCH_SIZE        = 4
+KP_SEG_BATCH_SIZE        = _env_int("KP_SEG_BATCH_SIZE", 4)
 KP_SEG_LR                = 1e-4
 KP_SEG_WEIGHT_DECAY      = 1e-4
 KP_SEG_WARMUP_ITERS      = 500
