@@ -83,7 +83,7 @@ DEVICE          = os.environ.get("DEVICE", "cuda")  # "cuda" or "cpu"
 INPUT_SIZE      = 640           # input image size for all models
 VAL_RATIO       = 0.2          # fraction of data used for validation
 RANDOM_SEED     = 42
-NUM_WORKERS     = 4
+NUM_WORKERS     = _env_int("NUM_WORKERS", 4)   # env-overridable; lowered on small-VRAM hosts
 
 # ImageNet normalization — shared across all models
 PIXEL_MEAN      = [0.485, 0.456, 0.406]
@@ -96,7 +96,7 @@ PIXEL_STD       = [0.229, 0.224, 0.225]
 YOLO_BBOX_MODEL_SIZE     = "yolov8n.pt"
 YOLO_POLYGON_MODEL_SIZE     = "yolov8n-seg.pt"
 YOLO_EPOCHS         = _env_int("YOLO_EPOCHS", 50)
-YOLO_BATCH_SIZE     = 8
+YOLO_BATCH_SIZE     = _env_int("YOLO_BATCH_SIZE", 8)   # env-overridable; lowered on small-VRAM hosts (8 GB OOMs at 8)
 YOLO_LR             = 0.01
 YOLO_PATIENCE       = 20
 YOLO_SCORE_THRESH   = 0.25
