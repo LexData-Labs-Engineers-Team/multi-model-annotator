@@ -36,6 +36,21 @@ def log(msg=""):
     _log_file.write(msg + "\n")
 
 
+def _free_gpu():
+    """Release a finished stage's GPU memory before the next stage starts, so the
+    sequential bbox→polygon→keypoint→polyline stages don't accumulate cached
+    allocations (a cause of CUDA out-of-memory in a later stage on small GPUs)."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
 # ============================================================
 # --- Path validation ---
 # ============================================================
@@ -144,6 +159,8 @@ def main():
             log(f"  FAILED: {e}")
             failures[BBOX_TYPE] = str(e)
 
+    _free_gpu()
+
     # --- Polygon ---
     if not cfg.TRAIN_POLYGON:
         log("\n  [2/5] POLYGON — disabled in config")
@@ -177,6 +194,8 @@ def main():
             log(f"  FAILED: {e}")
             failures[POLYGON_TYPE] = str(e)
 
+    _free_gpu()
+
     # --- Keypoint ---
     if not cfg.TRAIN_KEYPOINT:
         log("\n  [3/5] KEYPOINT — disabled in config")
@@ -199,6 +218,8 @@ def main():
             log(f"  FAILED: {e}")
             failures[KEYPOINT_TYPE] = str(e)
 
+    _free_gpu()
+
     # --- Polyline ---
     if not cfg.TRAIN_POLYLINE:
         log("\n  [4/5] POLYLINE — disabled in config")
@@ -220,6 +241,8 @@ def main():
         except Exception as e:
             log(f"  FAILED: {e}")
             failures[POLYLINE_TYPE] = str(e)
+
+    _free_gpu()
 
     # --- Tag ---
     if not cfg.TRAIN_TAG:
